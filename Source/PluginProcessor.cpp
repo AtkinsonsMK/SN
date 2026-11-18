@@ -50,8 +50,6 @@ void SNSynthProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     synth.setCurrentPlaybackSampleRate (sampleRate);
     keyboardState.reset();
 
-    updateVoiceSettings();
-
     outputGain.reset (sampleRate, 0.02);
     outputGain.setCurrentAndTargetValue (volumeDbToGain (volumeParam->load()));
 }
@@ -389,41 +387,76 @@ float SNSynthProcessor::lfoShapeValue (int shape, double phase, float randomValu
 void SNSynthProcessor::renderLfo (int numSamples)
 {
     // Two free-running LFOs, so they keep their place between notes.
-    const char* rateIds[2]   = { ParamIDs::lfoRate, ParamIDs::lfo2Rate };
-    const char* shapeIds[2]  = { ParamIDs::lfo1Shape, ParamIDs::lfo2Shape };
-    const char* smoothIds[2] = { ParamIDs::lfo1Smooth, ParamIDs::lfo2Smooth };
+    // Their Rate and Smooth can be modulated, including by the LFOs
+    // themselves: each update uses the LFOs' latest output (the sample
+    // before), which keeps the loop stable.
+    const int shapes[2] = { (int) p (ParamIDs::lfo1Shape)->load(), (int) p (ParamIDs::lfo2Shape)->load() };
+    const int rateT[2]   = { Mod::lfo1Rate, Mod::lfo2Rate };
+    const int smoothT[2] = { Mod::lfo1Smooth, Mod::lfo2Smooth };
+    auto& m = modContext;
 
-    for (int l = 0; l < 2; ++l)
-    {
-        auto& buf = lfoBuffers[(size_t) l];
+    for (auto& buf : lfoBuffers)
         if ((int) buf.size() < numSamples)
             buf.resize ((size_t) numSamples); // only if the host exceeds its announced block size
 
-        const float rate = p (rateIds[l])->load();
-        const double inc = rate / currentSampleRate;
-        const int shape = (int) p (shapeIds[l])->load();
+    bool anyLfoRoutes = false;
+    for (int r = 0; r < m.numRoutes; ++r)
+        anyLfoRoutes = anyLfoRoutes || m.routes[(size_t) r].target >= Mod::lfo1Rate;
 
-        // Smooth rounds off corners: a gentle low-pass whose time is up to
-        // a quarter of one LFO cycle at 100%.
-        const float smooth = p (smoothIds[l])->load() * 0.01f;
-        const float smoothSeconds = smooth * 0.25f / rate;
-        const float coef = smoothSeconds > 1.0e-5f ? 1.0f - std::exp (-1.0f / (smoothSeconds * (float) currentSampleRate)) : 1.0f;
-
-        auto& phase = lfoPhases[(size_t) l];
-        for (int i = 0; i < numSamples; ++i)
+    float rate[2] {}, coef[2] {};
+    for (int i = 0; i < numSamples; ++i)
+    {
+        if (i % 16 == 0)
         {
-            const float raw = lfoShapeValue (shape, phase, lfoRandom[(size_t) l]);
-            lfoSmoothed[(size_t) l] += (raw - lfoSmoothed[(size_t) l]) * coef;
-            buf[(size_t) i] = lfoSmoothed[(size_t) l];
-            phase += inc;
+            float offset[Mod::numTargets - Mod::lfo1Rate] {};
+            if (anyLfoRoutes)
+            {
+                float src[Mod::numSources];
+                for (int s = 0; s < Mod::numSources; ++s)
+                    src[s] = m.newestSources[(size_t) s];
+                src[Mod::lfo1] = lfoSmoothed[0];
+                src[Mod::lfo2] = lfoSmoothed[1];
+                src[Mod::modWheel] = m.modWheel;
+                for (int r = 0; r < m.numRoutes; ++r)
+                {
+                    const auto& route = m.routes[(size_t) r];
+                    if (route.target >= Mod::lfo1Rate)
+                        offset[route.target - Mod::lfo1Rate] += src[route.source] * route.amount;
+                }
+            }
+            for (int l = 0; l < 2; ++l)
+            {
+                const float ro = offset[rateT[l] - Mod::lfo1Rate], so = offset[smoothT[l] - Mod::lfo1Rate];
+                rate[l] = std::abs (ro) > 1.0e-7f ? Mod::applyOffset (m, rateT[l], ro) : m.baseReal[(size_t) rateT[l]];
+                rate[l] = juce::jlimit (0.05f, 20.0f, rate[l]);
+                const float smoothPct = std::abs (so) > 1.0e-7f ? Mod::applyOffset (m, smoothT[l], so) : m.baseReal[(size_t) smoothT[l]];
+
+                // Smooth rounds off corners: a gentle low-pass whose time is up
+                // to a quarter of one LFO cycle at 100%.
+                const float smoothSeconds = smoothPct * 0.01f * 0.25f / rate[l];
+                coef[l] = smoothSeconds > 1.0e-5f ? 1.0f - std::exp (-1.0f / (smoothSeconds * (float) currentSampleRate)) : 1.0f;
+            }
+        }
+
+        for (int l = 0; l < 2; ++l)
+        {
+            auto& phase = lfoPhases[(size_t) l];
+            const float raw = lfoShapeValue (shapes[l], phase, lfoRandom[(size_t) l]);
+            lfoSmoothed[(size_t) l] += (raw - lfoSmoothed[(size_t) l]) * coef[l];
+            lfoBuffers[(size_t) l][(size_t) i] = lfoSmoothed[(size_t) l];
+            phase += rate[l] / currentSampleRate;
             if (phase >= 1.0)
             {
-                phase -= 1.0;
+                phase -= std::floor (phase);
                 lfoRandom[(size_t) l] = lfoRng.nextFloat() * 2.0f - 1.0f;
             }
         }
-        voiceSettings.lfo[l] = buf.data();
-        modContext.lfo[l] = buf.data();
+    }
+
+    for (int l = 0; l < 2; ++l)
+    {
+        voiceSettings.lfo[l] = lfoBuffers[(size_t) l].data();
+        modContext.lfo[l] = lfoBuffers[(size_t) l].data();
     }
 }
 

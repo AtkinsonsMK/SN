@@ -47,18 +47,24 @@ namespace Mod
         f2Cutoff, f2Res, f2Drive, f2Env, f2Char,
         f3Cutoff, f3Res, f3Drive, f3Env, f3Char,
         eqLow, eqMid, eqHigh, volume,
+        lfo1Rate, lfo1Smooth, lfo2Rate, lfo2Smooth,
         numTargets
     };
 
     // Filter slot targets: control 0 Cutoff, 1 Resonance, 2 Drive, 3 Env, 4 Type knob.
     constexpr int filterTarget (int slot, int control) { return f1Cutoff + slot * 5 + control; }
 
-    // Volume acts on the whole sound rather than on each note.
-    constexpr bool isGlobal (int t) { return t == volume; }
+    // Volume and the LFOs' own knobs act on the whole synth rather than on each note.
+    constexpr bool isGlobal (int t) { return t >= volume; }
 
-    // Cutoff is moved in octaves: an amount of 100% = 10 octaves (the whole range).
+    // Cutoff and LFO Rate are moved in octaves: an amount of 100% covers the
+    // whole range (10 octaves for Cutoff, about 8.6 for LFO Rate).
     constexpr bool isCutoff (int t) { return t == f1Cutoff || t == f2Cutoff || t == f3Cutoff; }
+    constexpr bool isRate (int t)   { return t == lfo1Rate || t == lfo2Rate; }
     constexpr float cutoffOctavesAtFull = 10.0f;
+    constexpr float rateOctavesAtFull = 8.64f; // 0.05 to 20 Hz
+    constexpr bool isOctaveScaled (int t) { return isCutoff (t) || isRate (t); }
+    constexpr float octavesAtFull (int t) { return isRate (t) ? rateOctavesAtFull : cutoffOctavesAtFull; }
 
     inline const std::array<juce::String, numTargets>& targetIds()
     {
@@ -83,6 +89,10 @@ namespace Mod
             a[(size_t) n++] = ParamIDs::eqMid;
             a[(size_t) n++] = ParamIDs::eqHigh;
             a[(size_t) n++] = ParamIDs::volume;
+            a[(size_t) n++] = ParamIDs::lfoRate;
+            a[(size_t) n++] = ParamIDs::lfo1Smooth;
+            a[(size_t) n++] = ParamIDs::lfo2Rate;
+            a[(size_t) n++] = ParamIDs::lfo2Smooth;
             jassert (n == numTargets);
             return a;
         }();
@@ -168,9 +178,9 @@ namespace Mod
     inline float applyOffset (const Context& c, int t, float offset)
     {
         const auto& r = c.ranges[(size_t) t];
-        if (isCutoff (t))
+        if (isOctaveScaled (t))
         {
-            const float oct = std::log2 (juce::jmax (1.0f, c.baseReal[(size_t) t])) + offset * cutoffOctavesAtFull;
+            const float oct = std::log2 (juce::jmax (1.0e-3f, c.baseReal[(size_t) t])) + offset * octavesAtFull (t);
             return juce::jlimit (r.start, r.end, std::exp2 (oct));
         }
         return r.convertFrom0to1 (juce::jlimit (0.0f, 1.0f, c.baseNorm[(size_t) t] + offset));

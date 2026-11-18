@@ -905,6 +905,38 @@ int main (int argc, char** argv)
         check (gain > 1.3f, "EQ moved to the front still boosts the bass (x" + juce::String (gain, 2) + ")");
     }
 
+
+    //==========================================================================
+    // LFOs modulating LFO speed
+    {
+        auto pulses = [&] (bool modulated, bool selfMod)
+        {
+            auto p = makeSynth (sr);
+            setParam (*p, ParamIDs::lfo2Rate, 2.0f);
+            setParam (*p, ParamIDs::lfo2Shape, 4); // Square
+            setParam (*p, ParamIDs::lfoRate, 0.5f);
+            setParam (*p, ParamIDs::lfo1Shape, 4);
+            p->modMatrix.set (Mod::lfo2, Mod::volume, -0.5f);
+            if (modulated) p->modMatrix.set (Mod::lfo1, Mod::lfo2Rate, 0.4f);
+            if (selfMod)   p->modMatrix.set (Mod::lfo2, Mod::lfo2Rate, 0.5f);
+            auto out = render (*p, 57, 400, false); // about 4.3 s
+            // Count level jumps (square LFO edges) in 10 ms windows.
+            int edges = 0; bool loud = false; bool first = true; bool finite = true;
+            for (int k = 2; k < out.getNumSamples() / 480; ++k)
+            {
+                const float r = out.getRMSLevel (0, k * 480, 480);
+                if (! std::isfinite (r)) finite = false;
+                const bool l = r > 0.02f;
+                if (! first && l != loud) ++edges;
+                loud = l; first = false;
+            }
+            return finite ? edges : -1;
+        };
+        const int plain = pulses (false, false), crossed = pulses (true, false), self = pulses (false, true);
+        check (crossed > plain + 4, "LFO 1 > LFO 2 Rate speeds LFO 2 up and down (" + juce::String (plain) + " vs " + juce::String (crossed) + " edges)");
+        check (self >= 0 && self != plain, "LFO 2 can modulate its own Rate and stays stable (" + juce::String (self) + " edges)");
+    }
+
     std::cout << (failures == 0 ? "All checks passed" : juce::String (failures) + " check(s) failed") << std::endl;
     return failures == 0 ? 0 : 1;
 }
