@@ -3,12 +3,60 @@
 #include "PluginProcessor.h"
 #include "Visualisers.h"
 
+class SNSynthEditor;
+struct Knob;
+
+// Drawn over a knob: a coloured arc for each modulation source connected to
+// it, showing how far that source can move the knob. While a source is
+// selected in the header, dragging here sets that source's amount.
+class ModRing : public juce::Component
+{
+public:
+    ModRing (SNSynthEditor& e, Knob& k, int targetIndex) : target (targetIndex), editor (e), knob (k)
+    {
+        setWantsKeyboardFocus (false);
+        setInterceptsMouseClicks (false, false);
+    }
+    void paint (juce::Graphics&) override;
+    void mouseDown (const juce::MouseEvent&) override;
+    void mouseDrag (const juce::MouseEvent&) override;
+    void mouseUp (const juce::MouseEvent&) override;
+    void mouseDoubleClick (const juce::MouseEvent&) override;
+
+    const int target;
+
+private:
+    SNSynthEditor& editor;
+    Knob& knob;
+    float dragStartAmount = 0.0f;
+    bool dragging = false;
+};
+
 // One labelled knob attached to a parameter.
 struct Knob
 {
     juce::Slider slider;
     juce::Label  label;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> attachment;
+    std::unique_ptr<ModRing> ring; // only for knobs that can be modulated
+};
+
+// The list of every active routing, with a remove button on each.
+class ModList : public juce::Component
+{
+public:
+    explicit ModList (SNSynthEditor& e) : editor (e) {}
+    void paint (juce::Graphics&) override;
+    void mouseUp (const juce::MouseEvent&) override;
+    void mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails&) override;
+    void refresh(); // rebuild the rows if any amount changed
+
+private:
+    struct Row { int source, target; float amount; };
+    SNSynthEditor& editor;
+    std::vector<Row> rows;
+    int scroll = 0;
+    static constexpr int rowH = 20;
 };
 
 // A titled panel of knobs.
@@ -27,6 +75,8 @@ struct SlotPanel
     juce::ComboBox type;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> typeAttachment;
     juce::TextButton moveLeft { "<" }, moveRight { ">" };
+    juce::ToggleButton levelMatch { "Match" };
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> levelMatchAttachment;
     KnobGroup group;
     Knob* characterKnob = nullptr;
     int shownType = -1;
@@ -44,7 +94,13 @@ public:
     void resized() override;
 
     // The panel is laid out at this size and scaled to the window.
-    static constexpr int baseW = 1100, baseH = 1000;
+    static constexpr int baseW = 1200, baseH = 1000;
+
+    SNSynthProcessor& getProcessor() { return processor; }
+    int getSelectedSource() const { return modSource; }
+    juce::String targetName (int target) const;
+    void modulationChanged(); // repaint rings and the list
+    void showSourceForSnapshot (int source) { selectSource (source); modulationChanged(); }
     bool keyPressed (const juce::KeyPress&) override;
     bool keyStateChanged (bool isKeyDown) override;
     void visibilityChanged() override;
@@ -64,6 +120,8 @@ private:
     bool updateHeldKeys();
     void shiftOctave (int delta);
     void updateOctaveLabel();
+    void selectSource (int source);
+    void updateHint();
 
     SNSynthProcessor& processor;
 
@@ -75,13 +133,13 @@ private:
     } content;
 
     std::vector<std::unique_ptr<Knob>> knobs;
-    KnobGroup oscGroup, osc2Group, mixGroup, filterEnvGroup, ampEnvGroup, movementGroup, eqGroup, outputGroup;
+    KnobGroup oscGroup, osc2Group, mixGroup, playGroup, filterEnvGroup, ampEnvGroup, lfo1Group, lfo2Group, eqGroup, outputGroup;
     std::array<SlotPanel, 3> slots;
     std::array<int, 3> shownOrder { -1, -1, -1 };
 
     Vis::Scope scope1, scope2, scopeMix;
     Vis::EnvelopeShape filterEnvShape, ampEnvShape;
-    Vis::LfoShape lfoShape;
+    Vis::LfoShape lfo1Shape, lfo2Shape;
     Vis::EqCurve eqCurve;
     std::array<std::unique_ptr<Vis::FilterCurve>, 3> filterCurves;
     std::vector<juce::Component*> displays;
@@ -90,6 +148,20 @@ private:
     std::unique_ptr<Vis::NumbersWindow> numbersWindow;
 
     Vis::OutputMeter outputMeter;
+    juce::ToggleButton limiterButton { "Limiter" }, voiceCompButton { "Voice Gain Comp" };
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> limiterAttachment, voiceCompAttachment;
+    juce::ComboBox oversamplingBox;
+    juce::Label oversamplingLabel;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> oversamplingAttachment;
+
+    // Modulation
+    std::array<juce::TextButton, Mod::numSources> sourceButtons;
+    juce::Label modulateLabel;
+    int modSource = -1; // the source being assigned, or -1
+    ModList modList;
+    juce::Rectangle<int> modListBounds;
+    std::vector<ModRing*> rings;
+    float matrixChecksum = 0.0f;
     juce::MidiKeyboardComponent keyboard;
     juce::Label octaveLabel;
     juce::Label hintLabel;

@@ -305,18 +305,45 @@ void LfoShape::paint (juce::Graphics& g)
 {
     paintScreen (g);
     auto r = getLocalBounds().toFloat().reduced (6.0f, 5.0f);
-    auto yFor = [&] (float phase) { const float v = phase < 0.5f ? 4.0f * phase - 1.0f : 3.0f - 4.0f * phase; return r.getCentreY() - v * r.getHeight() * 0.5f; };
+    g.setColour (Colours::grid);
+    g.drawHorizontalLine ((int) r.getCentreY(), r.getX(), r.getRight());
 
+    const int shape = (int) param (index == 0 ? ParamIDs::lfo1Shape : ParamIDs::lfo2Shape);
+    const float smooth = param (index == 0 ? ParamIDs::lfo1Smooth : ParamIDs::lfo2Smooth) * 0.01f;
+
+    // Two cycles, drawn through the same smoothing the sound uses, so
+    // Smooth visibly rounds the corners. Random uses a fixed example pattern.
+    const int n = juce::jmax (2, (int) r.getWidth());
+    const float steps[] = { 0.6f, -0.3f, 0.9f, -0.8f };
+    const float smoothCycles = smooth * 0.25f;
+    const float coef = smoothCycles > 1.0e-4f ? 1.0f - std::exp (-1.0f / (smoothCycles * (float) n * 0.5f)) : 1.0f;
+    float y = SNSynthProcessor::lfoShapeValue (shape, 0.0, steps[3]);
+    std::vector<float> v ((size_t) n + 1);
+    // run one cycle first so the drawing starts settled
+    for (int pass = 0; pass < 2; ++pass)
+        for (int i = 0; i <= n; ++i)
+        {
+            const double t = 2.0 * i / n;
+            const double ph = t - std::floor (t);
+            const float raw = SNSynthProcessor::lfoShapeValue (shape, ph, steps[juce::jlimit (0, 3, (int) t + pass * 2)]);
+            y += (raw - y) * coef;
+            v[(size_t) i] = y;
+        }
+
+    const auto colour = Mod::sourceColour (index == 0 ? Mod::lfo1 : Mod::lfo2);
     juce::Path p;
-    p.startNewSubPath (r.getX(), yFor (0.0f));
-    p.lineTo (r.getX() + r.getWidth() * 0.5f, yFor (0.5f));
-    p.lineTo (r.getRight(), yFor (1.0f));
-    g.setColour (Colours::trace);
+    for (int i = 0; i <= n; ++i)
+    {
+        const float py = r.getCentreY() - v[(size_t) i] * r.getHeight() * 0.46f;
+        if (i == 0) p.startNewSubPath (r.getX(), py); else p.lineTo (r.getX() + (float) i, py);
+    }
+    g.setColour (colour);
     g.strokePath (p, juce::PathStrokeType (1.6f));
 
-    const float phase = processor.live.lfoPhase.load();
+    const float phase = index == 0 ? processor.live.lfoPhase.load() : processor.live.lfo2Phase.load();
+    const int xi = juce::jlimit (0, n, (int) (phase * 0.5f * (float) n));
     g.setColour (juce::Colours::white);
-    g.fillEllipse (r.getX() + phase * r.getWidth() - 3.5f, yFor (phase) - 3.5f, 7.0f, 7.0f);
+    g.fillEllipse (r.getX() + (float) xi - 3.5f, r.getCentreY() - v[(size_t) xi] * r.getHeight() * 0.46f - 3.5f, 7.0f, 7.0f);
 }
 
 //==============================================================================

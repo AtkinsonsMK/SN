@@ -77,7 +77,12 @@ static int saveSnapshot (const juce::File& file)
     setParam (*p, ParamIDs::slot (2, ParamIDs::slotResonance), 40);
     setParam (*p, ParamIDs::eqLow, 4);
     setParam (*p, ParamIDs::eqHigh, -6);
-    setParam (*p, ParamIDs::lfoCutoff, 20);
+    p->modMatrix.set (Mod::lfo1, Mod::filterTarget (0, 0), 0.12f);
+    p->modMatrix.set (Mod::lfo2, Mod::filterTarget (1, 0), -0.2f);
+    p->modMatrix.set (Mod::velocity, Mod::osc2Level, 0.3f);
+    p->modMatrix.set (Mod::filterEnv, Mod::fm12, 0.25f);
+    setParam (*p, ParamIDs::lfo2Shape, 0);
+    setParam (*p, ParamIDs::lfo2Smooth, 40);
     setParam (*p, ParamIDs::osc2Level, 70);
     setParam (*p, ParamIDs::osc2Coarse, 7);
     setParam (*p, ParamIDs::osc2Sine, 60);
@@ -85,6 +90,8 @@ static int saveSnapshot (const juce::File& file)
     setParam (*p, ParamIDs::fm1to2, 25);
 
     std::unique_ptr<juce::AudioProcessorEditor> editor (p->createEditor());
+    if (auto* ed = dynamic_cast<SNSynthEditor*> (editor.get()))
+        ed->showSourceForSnapshot (Mod::lfo2);
     juce::AudioBuffer<float> block (2, 512);
     juce::MidiBuffer m;
     for (int n : { 45, 52, 57 }) m.addEvent (juce::MidiMessage::noteOn (1, n, (juce::uint8) 110), 0);

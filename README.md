@@ -72,20 +72,44 @@ document.
 | | Decay | 1 ms to 10 s | 300 ms |
 | | Sustain | 0 to 100% | 100% |
 | | Release | 1 ms to 15 s | 200 ms |
-| Movement | LFO Rate | 0.05 to 20 Hz | 4 Hz |
-| | LFO to Cutoff | 0 to 100% | 0% |
-| | Drift | 0 to 100% (up to about ±10 cents) | 15% |
-| | Glide | 0 to 2 s | 0 s |
+| Mix and Voices | Drift (slow random pitch wander per note) | 0 to 100% (up to about ±10 cents) | 15% |
+| | Glide (slide between notes) | 0 to 2 s | 0 s |
+| Playing | Velocity (how much playing harder makes notes louder) | 0 to 100% | 50% |
+| | Key Track (how much filter cutoff follows the note you play) | 0 to 100% | 50% |
+| | Bend Range (pitch wheel) | 0 to 24 semitones | 2 st |
+| LFO 1 | Rate | 0.05 to 20 Hz | 4 Hz |
+| | Shape | Sine, Triangle, Saw Up, Saw Down, Square, Random | Triangle |
+| | Smooth (rounds off sharp corners and steps) | 0 to 100% | 0% |
+| LFO 2 | Rate | 0.05 to 20 Hz | 0.5 Hz |
+| | Shape | as LFO 1 | Sine |
+| | Smooth | 0 to 100% | 0% |
 | Filter 1, 2, 3 | Type | Off, OTA, Sallen-Key, Lowpass Gate, Steiner-Parker, Polivoks, Comb, Formant | OTA / Off / Off |
 | | Cutoff | 20 Hz to 20 kHz | 5 kHz / 2 kHz / 2 kHz |
 | | Resonance | 0 to 100% | 15% |
 | | Drive | 0 to 100% | 0% |
 | | Env Amount | -100 to +100% | +40% / 0% / 0% |
+| | Match (Level Match: evens out loudness between filter types) | on / off | on |
 | | Type knob | OTA: Slope 24/12 dB; Sallen-Key: HP Cutoff 20 Hz to 2 kHz; Lowpass Gate: Gate Decay 0.12 to 3 s; Steiner-Parker: Mode LP/BP/HP; Polivoks: Mode LP/BP; Comb: Polarity +/-; Formant: Vowel A/E/I/O/U (Cutoff 1 kHz = natural voice) | 0% |
 | EQ | Low (shelf 100 Hz) | -12 to +12 dB | 0 dB |
 | | Mid (bell 1 kHz) | -12 to +12 dB | 0 dB |
 | | High (shelf 8 kHz) | -12 to +12 dB | 0 dB |
 | Output | Volume | -inf to +6 dB | -6 dB |
+| | Limiter (keeps peaks just under 0 dB, smoothly) | on / off | on |
+| | Voice Gain Comp (turns chords down so they don't jump in level) | on / off | on |
+| | Filter oversampling (filters run 1, 2 or 4 times faster inside: cleaner at high resonance/drive, more CPU) | 1x, 2x, 4x | 2x |
+
+**Safety:** whatever the settings, nothing leaves the synth above -0.3 dB. With the Limiter off, loud peaks are clipped flat instead (the CLIP light shows when that happens).
+
+## Modulation
+
+Any knob with a coloured ring can be moved by a modulation source:
+LFO 1, LFO 2, Filter Env, Amp Env, Velocity, Mod Wheel, or Key (which note you play; middle C is the centre).
+
+1. Click a source at the top (**MODULATE WITH**). Knobs that can take it get a faint ring.
+2. Drag any knob up or down to set how much the source moves it (hold Shift for fine control). A ring in the source's colour shows the range.
+3. Double-click a knob to disconnect that source. Click the source again when you're done.
+
+The **Modulation** panel lists every connection with its amount; click × to remove one. Amounts are a share of the knob's full travel (for Cutoff, 100% = 10 octaves). Connections are saved with the project.
 
 The **output meter** next to Volume shows the level in dB: the solid bar is the average, the thin line is the peak, and the white line holds the recent peak. The **CLIP** light turns red if the sound goes over 0 dB and stays on until you click it.
 

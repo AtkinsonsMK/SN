@@ -83,12 +83,15 @@ namespace Vis
         bool filterEnv;
     };
 
-    // LFO triangle with its current position.
+    // One LFO's shape (one cycle), with its current position.
     class LfoShape : public Display
     {
     public:
-        using Display::Display;
+        LfoShape (SNSynthProcessor& p, int lfoIndex) : Display (p), index (lfoIndex) {}
         void paint (juce::Graphics&) override;
+
+    private:
+        int index;
     };
 
     // EQ curve: the combined effect of Low, Mid and High.

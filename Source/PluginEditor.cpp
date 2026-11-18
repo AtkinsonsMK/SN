@@ -14,8 +14,8 @@ namespace
 SNSynthEditor::SNSynthEditor (SNSynthProcessor& p)
     : AudioProcessorEditor (&p),
       processor (p),
-      scope1 (p, 0), scope2 (p, 1), scopeMix (p, 2), filterEnvShape (p, true), ampEnvShape (p, false), lfoShape (p), eqCurve (p),
-      outputMeter (p),
+      scope1 (p, 0), scope2 (p, 1), scopeMix (p, 2), filterEnvShape (p, true), ampEnvShape (p, false), lfo1Shape (p, 0), lfo2Shape (p, 1), eqCurve (p),
+      outputMeter (p), modList (*this),
       keyboard (p.keyboardState, juce::MidiKeyboardComponent::horizontalKeyboard)
 {
     using namespace ParamIDs;
@@ -35,7 +35,12 @@ SNSynthEditor::SNSynthEditor (SNSynthProcessor& p)
 
     mixGroup.title = "Mix and Voices";
     mixGroup.knobs = { &makeKnob (subLevel, "Sub"), &makeKnob (fm1to2, "FM 1 > 2"), &makeKnob (fm2to1, "FM 2 > 1"),
-                       &makeKnob (ringMod, "Ring Mod"), &makeKnob (voices, "Voices") };
+                       &makeKnob (ringMod, "Ring Mod"), &makeKnob (voices, "Voices"),
+                       &makeKnob (drift, "Drift"), &makeKnob (glide, "Glide") };
+
+    playGroup.title = "Playing";
+    playGroup.knobs = { &makeKnob (velocityAmount, "Velocity"), &makeKnob (keyTracking, "Key Track"),
+                        &makeKnob (bendRange, "Bend Range") };
 
     filterEnvGroup.title = "Filter Envelope";
     filterEnvGroup.knobs = { &makeKnob (fenvAttack, "Attack"), &makeKnob (fenvDecay, "Decay"),
@@ -48,9 +53,10 @@ SNSynthEditor::SNSynthEditor (SNSynthProcessor& p)
     ampEnvGroup.knobs = { &makeKnob (aenvAttack, "Attack"), &makeKnob (aenvDecay, "Decay"),
                           &makeKnob (aenvSustain, "Sustain"), &makeKnob (aenvRelease, "Release") };
 
-    movementGroup.title = "Movement";
-    movementGroup.knobs = { &makeKnob (lfoRate, "LFO Rate"), &makeKnob (lfoCutoff, "LFO > Cutoff"),
-                            &makeKnob (drift, "Drift"), &makeKnob (glide, "Glide") };
+    lfo1Group.title = "LFO 1";
+    lfo1Group.knobs = { &makeKnob (lfoRate, "Rate"), &makeKnob (ParamIDs::lfo1Shape, "Shape"), &makeKnob (lfo1Smooth, "Smooth") };
+    lfo2Group.title = "LFO 2";
+    lfo2Group.knobs = { &makeKnob (lfo2Rate, "Rate"), &makeKnob (ParamIDs::lfo2Shape, "Shape"), &makeKnob (lfo2Smooth, "Smooth") };
 
     eqGroup.title = "EQ";
     eqGroup.knobs = { &makeKnob (eqLow, "Low"), &makeKnob (eqMid, "Mid"), &makeKnob (eqHigh, "High") };
@@ -69,9 +75,10 @@ SNSynthEditor::SNSynthEditor (SNSynthProcessor& p)
     mixGroup.display       = &scopeMix;
     filterEnvGroup.display = &filterEnvShape;
     ampEnvGroup.display    = &ampEnvShape;
-    movementGroup.display  = &lfoShape;
+    lfo1Group.display      = &lfo1Shape;
+    lfo2Group.display      = &lfo2Shape;
     eqGroup.display        = &eqCurve;
-    for (auto* group : { &oscGroup, &osc2Group, &mixGroup, &filterEnvGroup, &ampEnvGroup, &movementGroup, &eqGroup,
+    for (auto* group : { &oscGroup, &osc2Group, &mixGroup, &filterEnvGroup, &ampEnvGroup, &lfo1Group, &lfo2Group, &eqGroup,
                          &slots[0].group, &slots[1].group, &slots[2].group })
     {
         content.addAndMakeVisible (group->display);
@@ -118,13 +125,59 @@ SNSynthEditor::SNSynthEditor (SNSynthProcessor& p)
     content.addAndMakeVisible (octaveLabel);
     updateOctaveLabel();
 
-    hintLabel.setText ("Computer keyboard (FL Studio layout): Z S X D C V ... lower octave, Q 2 W 3 E R ... upper octave.",
-                       juce::dontSendNotification);
+    updateHint();
     hintLabel.setColour (juce::Label::textColourId, dimText);
     content.addAndMakeVisible (hintLabel);
 
     outputMeter.setTooltip ("Output level. Bar = average, line = peak. The light turns red if the sound goes over 0 dB; click to reset.");
     content.addAndMakeVisible (outputMeter);
+
+    limiterButton.setTooltip ("Output Limiter: keeps the output just under 0 dB by turning loud peaks down smoothly. "
+                              "Even when off, a safety ceiling stops anything above -0.3 dB (it clips instead).");
+    voiceCompButton.setTooltip ("Voice Gain Compensation: turns the sum down as more notes play, so chords don't jump in level");
+    for (auto* b : { &limiterButton, &voiceCompButton })
+    {
+        b->setWantsKeyboardFocus (false);
+        b->setColour (juce::ToggleButton::textColourId, text);
+        b->setColour (juce::ToggleButton::tickColourId, accent);
+        content.addAndMakeVisible (*b);
+    }
+    limiterAttachment   = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (processor.parameters, limiter, limiterButton);
+    voiceCompAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (processor.parameters, voiceGainComp, voiceCompButton);
+
+    oversamplingBox.addItemList ({ "1x", "2x", "4x" }, 1);
+    oversamplingBox.setWantsKeyboardFocus (false);
+    oversamplingBox.setTooltip ("Filter Oversampling: the filters run 1, 2 or 4 times faster inside. Higher is cleaner "
+                                "with lots of resonance or drive on high notes, and uses more CPU.");
+    oversamplingBox.setColour (juce::ComboBox::backgroundColourId, background);
+    content.addAndMakeVisible (oversamplingBox);
+    oversamplingAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment> (processor.parameters, oversampling, oversamplingBox);
+    oversamplingLabel.setText ("Filter oversampling", juce::dontSendNotification);
+    oversamplingLabel.setColour (juce::Label::textColourId, dimText);
+    oversamplingLabel.setFont (juce::FontOptions (12.0f));
+    content.addAndMakeVisible (oversamplingLabel);
+
+    // Modulation sources: pick one, then drag any knob to connect it.
+    modulateLabel.setText ("MODULATE WITH", juce::dontSendNotification);
+    modulateLabel.setColour (juce::Label::textColourId, dimText);
+    modulateLabel.setFont (juce::FontOptions (12.0f, juce::Font::bold));
+    modulateLabel.setJustificationType (juce::Justification::centredRight);
+    content.addAndMakeVisible (modulateLabel);
+    for (int src = 0; src < Mod::numSources; ++src)
+    {
+        auto& b = sourceButtons[(size_t) src];
+        b.setButtonText (Mod::sourceName (src));
+        b.setWantsKeyboardFocus (false);
+        b.setClickingTogglesState (false);
+        b.setColour (juce::TextButton::buttonColourId, panel);
+        b.setColour (juce::TextButton::buttonOnColourId, Mod::sourceColour (src));
+        b.setColour (juce::TextButton::textColourOffId, Mod::sourceColour (src));
+        b.setColour (juce::TextButton::textColourOnId, background);
+        b.setTooltip ("Click, then drag any knob to set how much " + juce::String (Mod::sourceName (src)) + " moves it");
+        b.onClick = [this, src] { selectSource (modSource == src ? -1 : src); };
+        content.addAndMakeVisible (b);
+    }
+    content.addAndMakeVisible (modList);
 
     heldNotes.fill (-1);
     setWantsKeyboardFocus (true);
@@ -186,6 +239,15 @@ void SNSynthEditor::setupSlot (SlotPanel& sp, int slotIndex)
         b->setColour (juce::TextButton::buttonColourId, background);
         content.addAndMakeVisible (*b);
     }
+    sp.levelMatch.setWantsKeyboardFocus (false);
+    sp.levelMatch.setColour (juce::ToggleButton::textColourId, dimText);
+    sp.levelMatch.setColour (juce::ToggleButton::tickColourId, accent);
+    sp.levelMatch.setTooltip ("Level Match: evens out the loudness between filter types (some are naturally louder or quieter). "
+                              "Turn off to hear each type's natural level.");
+    content.addAndMakeVisible (sp.levelMatch);
+    sp.levelMatchAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (
+        processor.parameters, slot (slotIndex, slotLevelMatch), sp.levelMatch);
+
     sp.moveLeft.setTooltip ("Move this filter earlier in the chain");
     sp.moveRight.setTooltip ("Move this filter later in the chain");
     sp.moveLeft.onClick = [this, slotIndex]
@@ -286,6 +348,20 @@ void SNSynthEditor::timerCallback()
     outputMeter.tick();
     content.repaint (0, 0, baseW, 60); // "n playing" in the header
 
+    // Redraw rings and the list when routings change (also from loading a project).
+    float sum = 0.0f;
+    for (int src = 0; src < Mod::numSources; ++src)
+        for (int t = 0; t < Mod::numTargets; ++t)
+            sum += processor.modMatrix.get (src, t) * (float) (1 + src * Mod::numTargets + t);
+    if (std::abs (sum - matrixChecksum) > 1.0e-6f)
+    {
+        matrixChecksum = sum;
+        modulationChanged();
+    }
+    // Rings follow their knob's value; cheap to repaint the ones in use.
+    for (auto* r : rings)
+        r->repaint();
+
     for (auto& sp : slots)
         updateSlotTypeDisplay (sp);
 
@@ -308,6 +384,14 @@ Knob& SNSynthEditor::makeKnob (const juce::String& paramId, const juce::String& 
     content.addAndMakeVisible (k->slider);
     k->attachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (
         processor.parameters, paramId, k->slider);
+
+    const int target = Mod::targetForParam (paramId);
+    if (target >= 0)
+    {
+        k->ring = std::make_unique<ModRing> (*this, *k, target);
+        content.addAndMakeVisible (*k->ring);
+        rings.push_back (k->ring.get());
+    }
 
     k->label.setText (labelText, juce::dontSendNotification);
     k->label.setJustificationType (juce::Justification::centred);
@@ -334,6 +418,8 @@ void SNSynthEditor::layoutGroup (KnobGroup& group, juce::Rectangle<int> area, in
         auto cell = inner.removeFromLeft (w);
         k->label.setBounds (cell.removeFromTop (16));
         k->slider.setBounds (cell.reduced (4, 0));
+        if (k->ring != nullptr)
+            k->ring->setBounds (k->slider.getBounds());
     }
 }
 
@@ -458,8 +544,11 @@ void SNSynthEditor::paintContent (juce::Graphics& g)
     g.drawText ("v" + juce::String (JucePlugin_VersionString) + "  ·  " + juce::String (processor.getActiveVoiceCount()) + " playing",
                 header.withTrimmedRight (104), juce::Justification::centredRight);
 
-    for (auto* group : { &oscGroup, &osc2Group, &mixGroup, &filterEnvGroup, &outputGroup, &ampEnvGroup, &movementGroup, &eqGroup,
-                         &slots[0].group, &slots[1].group, &slots[2].group })
+    KnobGroup modGroup;
+    modGroup.title = "Modulation";
+    modGroup.bounds = modListBounds;
+    for (auto* group : { &oscGroup, &osc2Group, &mixGroup, &playGroup, &filterEnvGroup, &outputGroup, &ampEnvGroup, &lfo1Group, &lfo2Group, &eqGroup,
+                         &slots[0].group, &slots[1].group, &slots[2].group, &modGroup })
     {
         g.setColour (panel);
         g.fillRoundedRectangle (group->bounds.toFloat(), 8.0f);
@@ -497,19 +586,30 @@ void SNSynthEditor::layoutContent()
 
     numbersButton.setBounds (baseW - 20 - 90, 26, 90, 24);
 
+    // Header: modulation sources
+    {
+        juce::Rectangle<int> strip (180, 26, 720, 24);
+        modulateLabel.setBounds (strip.removeFromLeft (108));
+        strip.removeFromLeft (6);
+        const int w = strip.getWidth() / Mod::numSources;
+        for (auto& b : sourceButtons)
+            b.setBounds (strip.removeFromLeft (w).reduced (2, 0));
+    }
+
     const int rowH = 180, gap = 8;
 
-    // Row 1: the two oscillators
+    // Row 1: the two oscillators and playing settings
     auto row1 = area.removeFromTop (rowH);
-    const int oscW = (row1.getWidth() - gap) / 2;
-    layoutGroup (oscGroup,  row1.removeFromLeft (oscW)); row1.removeFromLeft (gap);
-    layoutGroup (osc2Group, row1);
+    const int unit1 = (row1.getWidth() - 2 * gap) / 17;
+    layoutGroup (oscGroup,  row1.removeFromLeft (unit1 * 7)); row1.removeFromLeft (gap);
+    layoutGroup (osc2Group, row1.removeFromLeft (unit1 * 7)); row1.removeFromLeft (gap);
+    layoutGroup (playGroup, row1);
 
     // Row 2: mix and voices, envelopes
     area.removeFromTop (gap);
     auto row2a = area.removeFromTop (rowH);
-    const int unit = (row2a.getWidth() - 2 * gap) / 13;
-    layoutGroup (mixGroup,       row2a.removeFromLeft (unit * 5)); row2a.removeFromLeft (gap);
+    const int unit = (row2a.getWidth() - 2 * gap) / 15;
+    layoutGroup (mixGroup,       row2a.removeFromLeft (unit * 7)); row2a.removeFromLeft (gap);
     layoutGroup (filterEnvGroup, row2a.removeFromLeft (unit * 4)); row2a.removeFromLeft (gap);
     layoutGroup (ampEnvGroup,    row2a);
 
@@ -531,22 +631,40 @@ void SNSynthEditor::layoutContent()
         header.removeFromRight (4);
         sp.moveLeft.setBounds (header.removeFromRight (22));
         header.removeFromRight (8);
+        sp.levelMatch.setBounds (header.removeFromRight (70));
         sp.type.setBounds (header.withY (header.getY() + 22).withHeight (22).withX (b.getX() + 8).withWidth (b.getWidth() - 16));
 
         sp.moveLeft.setEnabled (pos > 0);
         sp.moveRight.setEnabled (pos < 2);
     }
 
-    // Row 4: movement, EQ, output (Volume and the level meter)
+    // Row 4: LFOs, EQ, output (Volume, meter, switches), modulation list
     area.removeFromTop (gap);
     auto row3 = area.removeFromTop (rowH);
-    const int knobW = 84;
-    layoutGroup (movementGroup, row3.removeFromLeft (knobW * 4)); row3.removeFromLeft (gap);
-    layoutGroup (eqGroup,       row3.removeFromLeft (knobW * 3)); row3.removeFromLeft (gap);
-    auto out = row3.removeFromLeft (knobW + 80);
-    layoutGroup (outputGroup, out.withTrimmedRight (80));
+    const int knobW = 64;
+    layoutGroup (lfo1Group, row3.removeFromLeft (knobW * 3)); row3.removeFromLeft (gap);
+    layoutGroup (lfo2Group, row3.removeFromLeft (knobW * 3)); row3.removeFromLeft (gap);
+    layoutGroup (eqGroup,   row3.removeFromLeft (knobW * 3)); row3.removeFromLeft (gap);
+    auto out = row3.removeFromLeft (250);
+    row3.removeFromLeft (gap);
     outputGroup.bounds = out;
-    outputMeter.setBounds (out.removeFromRight (80).reduced (8, 10).withTrimmedTop (16));
+    {
+        auto inner = out.reduced (6).withTrimmedTop (22);
+        auto knobArea = inner.removeFromLeft (76);
+        auto* vol = outputGroup.knobs[0];
+        vol->label.setBounds (knobArea.removeFromTop (16));
+        vol->slider.setBounds (knobArea.removeFromTop (100).reduced (2, 0));
+        if (vol->ring != nullptr) vol->ring->setBounds (vol->slider.getBounds());
+        outputMeter.setBounds (inner.removeFromLeft (64).reduced (4, 0));
+        inner.removeFromLeft (6);
+        limiterButton.setBounds (inner.removeFromTop (24));
+        voiceCompButton.setBounds (inner.removeFromTop (24));
+        inner.removeFromTop (10);
+        oversamplingLabel.setBounds (inner.removeFromTop (18));
+        oversamplingBox.setBounds (inner.removeFromTop (24).withWidth (70));
+    }
+    modListBounds = row3;
+    modList.setBounds (row3.reduced (6).withTrimmedTop (22));
 
     area.removeFromTop (gap);
     auto bottom = area;
@@ -558,4 +676,232 @@ void SNSynthEditor::layoutContent()
     octaveLabel.setBounds (hintRow.removeFromRight (150));
     hintLabel.setBounds (hintRow);
     keyboard.setBounds (bottom.withTrimmedTop (4));
+}
+
+//==============================================================================
+// Modulation
+void SNSynthEditor::selectSource (int source)
+{
+    modSource = source;
+    for (int s = 0; s < Mod::numSources; ++s)
+        sourceButtons[(size_t) s].setToggleState (s == modSource, juce::dontSendNotification);
+    for (auto* r : rings)
+    {
+        r->setInterceptsMouseClicks (modSource >= 0, false);
+        r->setMouseCursor (modSource >= 0 ? juce::MouseCursor::UpDownResizeCursor : juce::MouseCursor::NormalCursor);
+        r->repaint();
+    }
+    updateHint();
+}
+
+void SNSynthEditor::updateHint()
+{
+    if (modSource >= 0)
+    {
+        const juce::String name (Mod::sourceName (modSource));
+        hintLabel.setText ("Assigning " + name + ": drag any knob up or down to set how much " + name
+                               + " moves it. Double-click a knob to disconnect. Click " + name + " again when done.",
+                           juce::dontSendNotification);
+        hintLabel.setColour (juce::Label::textColourId, Mod::sourceColour (modSource));
+    }
+    else
+    {
+        hintLabel.setText ("Computer keyboard (FL Studio layout): Z S X D C V ... lower octave, Q 2 W 3 E R ... upper octave.",
+                           juce::dontSendNotification);
+        hintLabel.setColour (juce::Label::textColourId, dimText);
+    }
+}
+
+juce::String SNSynthEditor::targetName (int target) const
+{
+    if (auto* param = processor.parameters.getParameter (Mod::targetIds()[(size_t) target]))
+        return param->getName (60);
+    return {};
+}
+
+void SNSynthEditor::modulationChanged()
+{
+    for (auto* r : rings)
+        r->repaint();
+    modList.refresh();
+}
+
+//==============================================================================
+namespace
+{
+    struct RingGeometry { juce::Point<float> centre; float radius, start, end; };
+
+    // Matches where JUCE's rotary knob draws its arc.
+    RingGeometry ringGeometry (const juce::Slider& slider, juce::Rectangle<int> local)
+    {
+        auto knobArea = local.withTrimmedBottom (slider.getTextBoxHeight()).toFloat().reduced (10.0f);
+        const float radius = juce::jmin (knobArea.getWidth(), knobArea.getHeight()) * 0.5f;
+        const auto p = slider.getRotaryParameters();
+        return { knobArea.getCentre(), radius, p.startAngleRadians, p.endAngleRadians };
+    }
+}
+
+void ModRing::paint (juce::Graphics& g)
+{
+    auto& matrix = editor.getProcessor().modMatrix;
+    const auto geo = ringGeometry (knob.slider, getLocalBounds());
+    const float value = (float) knob.slider.valueToProportionOfLength (knob.slider.getValue());
+    const int selected = editor.getSelectedSource();
+
+    // While assigning, show every knob that can take the source.
+    if (selected >= 0)
+    {
+        g.setColour (Mod::sourceColour (selected).withAlpha (0.6f));
+        g.drawEllipse (juce::Rectangle<float> (geo.radius * 2.0f + 6.0f, geo.radius * 2.0f + 6.0f).withCentre (geo.centre), 1.0f);
+    }
+
+    int ringIndex = 0;
+    for (int s = 0; s < Mod::numSources; ++s)
+    {
+        const float amount = matrix.get (s, target);
+        if (std::abs (amount) < 1.0e-5f)
+            continue;
+
+        // The arc runs from the knob's position to where the source can push it.
+        // Cutoff is moved in octaves, so convert to knob travel for the picture.
+        float reach = amount;
+        if (Mod::isCutoff (target))
+            reach = amount * Mod::cutoffOctavesAtFull / std::log2 (20000.0f / 20.0f);
+        const float from = juce::jlimit (0.0f, 1.0f, value);
+        const float to   = juce::jlimit (0.0f, 1.0f, value + reach);
+        const float lo   = Mod::isBipolar (s) ? juce::jlimit (0.0f, 1.0f, value - reach) : from;
+
+        const float r = geo.radius + 4.0f + 4.5f * (float) ringIndex++;
+        juce::Path arc;
+        const float a0 = geo.start + juce::jmin (lo, to) * (geo.end - geo.start);
+        const float a1 = geo.start + juce::jmax (lo, to) * (geo.end - geo.start);
+        arc.addCentredArc (geo.centre.x, geo.centre.y, r, r, 0.0f, a0, juce::jmax (a1, a0 + 0.02f), true);
+        g.setColour (Mod::sourceColour (s).withAlpha (s == selected || selected < 0 ? 1.0f : 0.45f));
+        g.strokePath (arc, juce::PathStrokeType (s == selected ? 4.0f : 3.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+    }
+
+    if (dragging && selected >= 0)
+    {
+        const float amount = matrix.get (selected, target);
+        g.setColour (juce::Colours::black.withAlpha (0.7f));
+        auto box = juce::Rectangle<float> (54.0f, 18.0f).withCentre (geo.centre);
+        g.fillRoundedRectangle (box, 3.0f);
+        g.setColour (Mod::sourceColour (selected));
+        g.setFont (12.0f);
+        g.drawText ((amount > 0.0f ? "+" : "") + juce::String (juce::roundToInt (amount * 100.0f)) + "%", box, juce::Justification::centred);
+    }
+}
+
+void ModRing::mouseDown (const juce::MouseEvent&)
+{
+    const int s = editor.getSelectedSource();
+    if (s < 0) return;
+    dragStartAmount = editor.getProcessor().modMatrix.get (s, target);
+    dragging = true;
+    repaint();
+}
+
+void ModRing::mouseDrag (const juce::MouseEvent& e)
+{
+    const int s = editor.getSelectedSource();
+    if (s < 0) return;
+    const float speed = e.mods.isShiftDown() ? 600.0f : 150.0f; // Shift = fine
+    editor.getProcessor().modMatrix.set (s, target, dragStartAmount - (float) e.getDistanceFromDragStartY() / speed);
+    editor.modulationChanged();
+}
+
+void ModRing::mouseUp (const juce::MouseEvent&)
+{
+    dragging = false;
+    repaint();
+}
+
+void ModRing::mouseDoubleClick (const juce::MouseEvent&)
+{
+    const int s = editor.getSelectedSource();
+    if (s < 0) return;
+    editor.getProcessor().modMatrix.set (s, target, 0.0f);
+    editor.modulationChanged();
+}
+
+//==============================================================================
+void ModList::refresh()
+{
+    rows.clear();
+    auto& m = editor.getProcessor().modMatrix;
+    for (int s = 0; s < Mod::numSources; ++s)
+        for (int t = 0; t < Mod::numTargets; ++t)
+        {
+            const float a = m.get (s, t);
+            if (std::abs (a) > 1.0e-5f)
+                rows.push_back ({ s, t, a });
+        }
+    scroll = juce::jlimit (0, juce::jmax (0, (int) rows.size() - getHeight() / rowH), scroll);
+    repaint();
+}
+
+void ModList::paint (juce::Graphics& g)
+{
+    g.setFont (juce::FontOptions (12.5f));
+    if (rows.empty())
+    {
+        g.setColour (dimText);
+        g.drawFittedText ("Nothing connected yet.\nPick a source at the top (LFO 1, LFO 2, ...) and drag any knob.",
+                          getLocalBounds().reduced (4), juce::Justification::centredLeft, 4);
+        return;
+    }
+
+    const int visible = getHeight() / rowH;
+    for (int i = 0; i < visible && i + scroll < (int) rows.size(); ++i)
+    {
+        const auto& row = rows[(size_t) (i + scroll)];
+        auto r = juce::Rectangle<int> (0, i * rowH, getWidth(), rowH);
+        if (i % 2 == 0)
+        {
+            g.setColour (background.withAlpha (0.5f));
+            g.fillRect (r);
+        }
+        auto chip = r.removeFromLeft (14).toFloat().withSizeKeepingCentre (8.0f, 8.0f);
+        g.setColour (Mod::sourceColour (row.source));
+        g.fillEllipse (chip);
+
+        auto remove = r.removeFromRight (20);
+        g.setColour (dimText);
+        g.drawText (juce::String::fromUTF8 ("\xc3\x97"), remove, juce::Justification::centred);
+
+        auto amountArea = r.removeFromRight (48);
+        g.setColour (text);
+        g.drawText ((row.amount > 0.0f ? "+" : "") + juce::String (juce::roundToInt (row.amount * 100.0f)) + "%",
+                    amountArea, juce::Justification::centredRight);
+
+        g.setColour (text);
+        g.drawText (juce::String (Mod::sourceName (row.source)) + juce::String::fromUTF8 ("  \xe2\x86\x92  ") + editor.targetName (row.target),
+                    r.withTrimmedLeft (4), juce::Justification::centredLeft, true);
+    }
+
+    if ((int) rows.size() > visible)
+    {
+        g.setColour (dimText);
+        g.drawText (juce::String (rows.size()) + " routings, scroll for more", getLocalBounds().removeFromBottom (14),
+                    juce::Justification::centredRight);
+    }
+}
+
+void ModList::mouseUp (const juce::MouseEvent& e)
+{
+    const int i = e.y / rowH + scroll;
+    if (i < 0 || i >= (int) rows.size())
+        return;
+    const auto row = rows[(size_t) i];
+    if (e.x > getWidth() - 20)
+    {
+        editor.getProcessor().modMatrix.set (row.source, row.target, 0.0f); // remove
+        editor.modulationChanged();
+    }
+}
+
+void ModList::mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails& w)
+{
+    scroll = juce::jlimit (0, juce::jmax (0, (int) rows.size() - getHeight() / rowH), scroll + (w.deltaY < 0 ? 1 : -1));
+    repaint();
 }
