@@ -43,7 +43,7 @@ namespace
             case FilterType::ota:
                 if (FilterShape::otaIs24dB (character))
                 {
-                    const float k = FilterShape::otaFeedback (res);
+                    const float k = std::min (3.96f, FilterShape::otaFeedback (res)); // at 4 and above it rings on its own
                     const C g = 1.0f / (1.0f + s);
                     const C g4 = g * g * g * g;
                     return std::abs (g4 / (1.0f + k * g4)) * (1.0f + k * 0.45f);

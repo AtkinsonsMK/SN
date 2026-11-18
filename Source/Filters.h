@@ -2,12 +2,16 @@
 
 #include <cmath>
 #include <algorithm>
+#include <array>
 #include <vector>
+#include <juce_dsp/juce_dsp.h>
 
 // The filter rack's analogue-style filter models.
 //
-// Each model runs at twice the sample rate internally (2x oversampling) so
-// that Drive and resonance stay smooth instead of turning harsh.
+// Each model runs at 1, 2 or 4 times the sample rate internally
+// (oversampling, 2x by default) so that Drive and resonance stay smooth
+// instead of turning harsh. The rate changes use steep "half-band" filters,
+// so the treble stays flat to about 20 kHz.
 //
 // Types are numbered as in the Type switch. The order must never change,
 // because FL Studio saves the switch position in projects.
@@ -64,7 +68,7 @@ namespace FilterMath
 // Settings shared by the sound and the on-screen filter curves.
 namespace FilterShape
 {
-    inline float otaFeedback (float res)        { return res * 3.9f; }
+    inline float otaFeedback (float res)        { return res * 4.15f; } // 24 dB: self-oscillates from about 96%
     inline float otaDamping (float res)         { return 2.0f * (1.0f - res * 0.97f); }
     inline float sallenKeyDamping (float res)   { return 2.0f * (1.0f - res * 1.02f); }
     inline float gateDamping (float res)        { return 2.0f * (1.0f - res * 0.8f); }
@@ -111,6 +115,72 @@ struct OnePole
     }
 
     float highpass (float x, float g) { return x - lowpass (x, g); }
+};
+
+// Doubles or halves the sample rate (one 2x step of oversampling). A
+// polyphase pair of all-pass chains: an elliptic half-band low-pass that is
+// flat (within a hair) across the passband and cuts the mirror images above
+// it by 80-90 dB. Up and down keep separate states.
+class Halfband
+{
+public:
+    // passbandEdge: the highest frequency to keep, as a fraction of the
+    // higher of the two rates (below 0.25).
+    void design (double passbandEdge)
+    {
+        const double tw = std::clamp (2.0 * (0.25 - passbandEdge), 0.03, 0.3);
+        auto up   = juce::dsp::FilterDesign<double>::designIIRLowpassHalfBandPolyphaseAllpassMethod (tw, -90.0);
+        numCoeffs = 0;
+        auto add = [this] (double a) { if (numCoeffs < maxCoeffs) coeffs[(size_t) numCoeffs++] = (float) a; };
+        for (int i = 0; i < up.directPath.size(); ++i)
+            add (up.directPath.getObjectPointer (i)->coefficients[0]);
+        numDirect = numCoeffs;
+        for (int i = 1; i < up.delayedPath.size(); ++i)
+            add (up.delayedPath.getObjectPointer (i)->coefficients[0]);
+        reset();
+    }
+
+    void reset()
+    {
+        upState.fill (0.0f);
+        downState.fill (0.0f);
+        downDelay = 0.0f;
+    }
+
+    // One input sample in, two out at the doubled rate.
+    void up (float x, float& out0, float& out1)
+    {
+        out0 = chain (x, 0, numDirect, upState);
+        out1 = chain (x, numDirect, numCoeffs, upState);
+    }
+
+    // Two samples at the doubled rate in, one out.
+    float down (float in0, float in1)
+    {
+        const float direct = chain (in0, 0, numDirect, downState);
+        const float y = 0.5f * (downDelay + direct);
+        downDelay = chain (in1, numDirect, numCoeffs, downState);
+        return y;
+    }
+
+private:
+    static constexpr int maxCoeffs = 16;
+
+    float chain (float x, int from, int to, std::array<float, maxCoeffs>& state) const
+    {
+        for (int n = from; n < to; ++n)
+        {
+            const float a = coeffs[(size_t) n];
+            const float y = a * x + state[(size_t) n];
+            state[(size_t) n] = x - a * y;
+            x = y;
+        }
+        return x;
+    }
+
+    std::array<float, maxCoeffs> coeffs {}, upState {}, downState {};
+    float downDelay = 0.0f;
+    int numCoeffs = 0, numDirect = 0;
 };
 
 // Outputs of a state-variable filter.
@@ -160,6 +230,10 @@ public:
     {
         hostRate = sampleRate;
         osRate = sampleRate * (float) factor;
+        // Keep everything up to 20 kHz (or just under the host's top, at low rates).
+        const double keep = std::min (20000.0, sampleRate * 0.4535);
+        stage1.design (keep / (2.0 * sampleRate));
+        stage2.design (keep / (4.0 * sampleRate));
         combBuffer.assign ((size_t) (sampleRate * 4.0f * 0.06f) + 4, 0.0f); // down to about 17 Hz at 4x
         gateAttackCoef = 1.0f - std::exp (-1.0f / (0.003f * sampleRate));
         reset();
@@ -173,8 +247,8 @@ public:
         for (auto& b : formantBands) b.reset();
         std::fill (combBuffer.begin(), combBuffer.end(), 0.0f);
         combWrite = 0;
-        ladderOut = 0.0f;
-        previousInput = 0.0f;
+        stage1.reset();
+        stage2.reset();
         gateLevel = 0.0f;
         gateHoldSamples = 0;
     }
@@ -213,18 +287,40 @@ public:
         const float g = FilterMath::tptGain (cutoffHz, osRate);
         currentCutoffHz = cutoffHz;
 
-        // Oversampling: run the circuit 1, 2 or 4 times per sample on
-        // in-between input values, then average. Higher = fewer harsh
+        // Oversampling: raise the rate (2x or 4x), run the circuit at the
+        // higher rate, then bring it back down. Higher = fewer harsh
         // artefacts from resonance and drive at high notes, more CPU.
-        float sum = 0.0f;
-        for (int k = 1; k <= factor; ++k)
+        const float in = x * driveGain;
+        float y;
+        if (factor == 1)
+            y = step (in, s, g);
+        else
         {
-            const float t = (float) k / (float) factor;
-            sum += step ((previousInput + (x - previousInput) * t) * driveGain, s, g);
+            float a, b;
+            stage1.up (in, a, b);
+            // (Each step runs in time order, one statement at a time.)
+            if (factor == 2)
+            {
+                const float ya = step (a, s, g);
+                const float yb = step (b, s, g);
+                y = stage1.down (ya, yb);
+            }
+            else
+            {
+                float a0, a1, b0, b1;
+                stage2.up (a, a0, a1);
+                const float y0 = step (a0, s, g);
+                const float y1 = step (a1, s, g);
+                const float ra = stage2.down (y0, y1);
+                stage2.up (b, b0, b1);
+                const float y2 = step (b0, s, g);
+                const float y3 = step (b1, s, g);
+                const float rb = stage2.down (y2, y3);
+                y = stage1.down (ra, rb);
+            }
         }
-        previousInput = x;
 
-        return sum / (float) factor * makeup * gateGain * (s.levelMatch ? typeTrim (s.type) : 1.0f);
+        return y * makeup * gateGain * (s.levelMatch ? typeTrim (s.type) : 1.0f);
     }
 
 private:
@@ -239,12 +335,19 @@ private:
                 if (FilterShape::otaIs24dB (s.character))
                 {
                     // 24 dB: four cascaded stages with feedback around them,
-                    // saturating at the input like an OTA ladder.
+                    // saturating at the input like an OTA ladder. Zero-delay
+                    // feedback: the loop is solved within each sample, so the
+                    // resonance is the same at every cutoff and self-oscillation
+                    // is in tune with the Cutoff.
                     const float k = FilterShape::otaFeedback (s.resonance);
-                    float u = sat (x - k * ladderOut);
+                    const float G = g / (1.0f + g);
+                    const float G2 = G * G, G4 = G2 * G2;
+                    // What the four stages will output from their stored
+                    // state alone (with no new input).
+                    const float S = (1.0f - G) * (G2 * G * poles[0].s + G2 * poles[1].s + G * poles[2].s + poles[3].s);
+                    float u = sat ((x - k * S) / (1.0f + k * G4));
                     for (auto& p : poles)
                         u = p.lowpass (u, g);
-                    ladderOut = u;
                     return u * (1.0f + k * 0.45f); // keep the bass as resonance rises
                 }
 
@@ -373,6 +476,8 @@ private:
     {
         factor = newFactor >= 4 ? 4 : (newFactor <= 1 ? 1 : 2);
         osRate = hostRate * (float) factor;
+        stage1.reset();
+        stage2.reset();
     }
 
     int   factor = 2;
@@ -384,8 +489,7 @@ private:
     SVF formantBands[3];
     std::vector<float> combBuffer;
     int combWrite = 0;
-    float ladderOut = 0.0f;
-    float previousInput = 0.0f;
+    Halfband stage1, stage2; // host rate <-> 2x, and 2x <-> 4x
     float currentCutoffHz = 1000.0f;
 
     float gateLevel = 0.0f;

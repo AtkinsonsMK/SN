@@ -101,6 +101,11 @@ private:
     std::array<FilterSlot, 3> drumFilters;   // the drums' own copy of each filter slot
     VoiceEq drumEq;
     VoiceSettings drumCur;                   // filter and EQ settings for the drums, with LFO modulation
+    struct DrumSmooth { float oct = 10.0f, res = 0.0f, drive = 0.0f, character = 0.0f; };
+    std::array<DrumSmooth, 3> drumSmooth {};
+    std::array<float, Drums::numDrums> drumLevelSmooth {};
+    float drumSmoothCoef = 0.005f;
+    std::array<float, 3> drumEqDb {};
     std::array<std::vector<float>, Drums::numRoutes> drumBus; // dry, into Filter 1, 2, 3
     std::vector<float> drumOut;
     std::atomic<uint32_t> auditionMask { 0 };

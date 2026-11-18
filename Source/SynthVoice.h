@@ -175,6 +175,7 @@ public:
             f.prepare ((float) newRate);
 
         smoothCoef = 1.0f - std::exp (-1.0f / (0.005f * (float) newRate)); // 5 ms
+        blockSmoothCoef = 1.0f - std::exp (-(float) modInterval / (0.005f * (float) newRate));
         driftCoef  = 1.0f - std::exp (-1.0f / (0.4f  * (float) newRate));  // 0.4 s
         driftValue = (float) (random.nextFloat() * 2.0 - 1.0);
     }
@@ -219,6 +220,7 @@ public:
             sSub = shared.subLevel;
             sFm12 = shared.fm1to2; sFm21 = shared.fm2to1; sRing = shared.ringMod;
             sLvl1 = shared.osc[0].level; sLvl2 = shared.osc[1].level;
+            snapSmoothing = true; // filter and tuning smoothing start at the knob values
         }
 
         for (auto& f : filters)
@@ -277,8 +279,7 @@ public:
 
         const double sr = getSampleRate();
         const int numChannels = output.getNumChannels();
-        float baseOct[3] {};
-        double tune1 = 1.0, tune2 = 1.0;
+        float baseOct[3] { sOct[0], sOct[1], sOct[2] };
 
         for (int i = 0; i < numSamples; ++i)
         {
@@ -292,10 +293,39 @@ public:
                 const float keyTrackOct = cur.keyTracking * (float) (currentNote - 60.0) / 12.0f; // follows Glide
                 for (int s = 0; s < 3; ++s)
                     baseOct[s] = std::log2 (cur.slots[s].cutoffHz) + keyTrackOct;
-                eq.update (sr, cur.eqLowDb, cur.eqMidDb, cur.eqHighDb);
-                tune1 = std::exp2 (cur.osc[0].tuneSemitones() / 12.0);
-                tune2 = std::exp2 (cur.osc[1].tuneSemitones() / 12.0);
+                if (snapSmoothing)
+                {
+                    for (int s = 0; s < 3; ++s)
+                    {
+                        const auto& slot = cur.slots[s];
+                        sOct[s] = baseOct[s]; sRes[s] = slot.resonance; sDrive[s] = slot.drive;
+                        sEnvAmt[s] = slot.envAmount; sChar[s] = slot.character;
+                    }
+                    sTune1 = cur.osc[0].tuneSemitones(); sTune2 = cur.osc[1].tuneSemitones();
+                    sEq[0] = cur.eqLowDb; sEq[1] = cur.eqMidDb; sEq[2] = cur.eqHighDb;
+                    snapSmoothing = false;
+                }
+                // EQ gains glide too (its coefficients are worked out every 16 samples).
+                sEq[0] += (cur.eqLowDb  - sEq[0]) * blockSmoothCoef;
+                sEq[1] += (cur.eqMidDb  - sEq[1]) * blockSmoothCoef;
+                sEq[2] += (cur.eqHighDb - sEq[2]) * blockSmoothCoef;
+                eq.update (sr, sEq[0], sEq[1], sEq[2]);
             }
+
+            // Smooth every continuous filter and tuning setting sample by
+            // sample (about 5 ms), so knob moves, automation and modulation
+            // glide instead of stepping ("zipper" noise).
+            for (int s = 0; s < 3; ++s)
+            {
+                const auto& slot = cur.slots[s];
+                sOct[s]    += (baseOct[s]     - sOct[s])    * smoothCoef;
+                sRes[s]    += (slot.resonance - sRes[s])    * smoothCoef;
+                sDrive[s]  += (slot.drive     - sDrive[s])  * smoothCoef;
+                sEnvAmt[s] += (slot.envAmount - sEnvAmt[s]) * smoothCoef;
+                sChar[s]   += (slot.character - sChar[s])   * smoothCoef;
+            }
+            sTune1 += (cur.osc[0].tuneSemitones() - sTune1) * smoothCoef;
+            sTune2 += (cur.osc[1].tuneSemitones() - sTune2) * smoothCoef;
 
             // Parameter smoothing (avoids zipper noise when knobs move).
             sSub   += (cur.subLevel - sSub)   * smoothCoef;
@@ -327,6 +357,7 @@ public:
 
             const double pitch = currentNote + bendSemitones * cur.bendRange + driftSemis;
             const double freq = 440.0 * std::pow (2.0, (pitch - 69.0) / 12.0);
+            const double tune1 = std::exp2 (sTune1 / 12.0), tune2 = std::exp2 (sTune2 / 12.0);
             const double inc1 = juce::jmin (freq * tune1 / sr, 0.45);
             const double inc2 = juce::jmin (freq * tune2 / sr, 0.45);
 
@@ -356,8 +387,9 @@ public:
                 const int b = cur.order[n];
                 if (Chain::isFilter (b))
                 {
-                    const auto& slot = cur.slots[b];
-                    const float cutoffOct = baseOct[b] + fenv * slot.envAmount * envOctavesAtFull + lfoOct;
+                    auto slot = cur.slots[b];
+                    slot.resonance = sRes[b]; slot.drive = sDrive[b]; slot.character = sChar[b];
+                    const float cutoffOct = sOct[b] + fenv * sEnvAmt[b] * envOctavesAtFull + lfoOct;
                     lastCutoffHz[b] = std::exp2 (juce::jlimit (4.3f, 14.3f, cutoffOct));
                     x = filters[b].process (x, slot, lastCutoffHz[b]);
                 }
@@ -515,7 +547,11 @@ private:
     float  lastFreq = 0.0f;
     float  lastCutoffHz[3] = { 1000.0f, 1000.0f, 1000.0f };
 
-    float smoothCoef = 0.01f;
+    float smoothCoef = 0.01f, blockSmoothCoef = 0.2f;
+    bool  snapSmoothing = true;
+    float sOct[3] { 10.0f, 10.0f, 10.0f }, sRes[3] {}, sDrive[3] {}, sEnvAmt[3] {}, sChar[3] {};
+    float sTune1 = 0.0f, sTune2 = 0.0f;
+    float sEq[3] {};
     float sSub = 0.0f, sFm12 = 0.0f, sFm21 = 0.0f, sRing = 0.0f, sLvl1 = 1.0f, sLvl2 = 0.0f;
 
     float driftCoef = 0.0001f, driftValue = 0.0f, driftTarget = 0.0f;

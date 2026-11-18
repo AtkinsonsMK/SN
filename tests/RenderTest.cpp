@@ -1134,6 +1134,141 @@ int main (int argc, char** argv)
         }
     }
 
+    // DSP quality (from the DSP review): oversampling treble, OTA 24 dB, smoothing.
+    {
+        const double fs = 44100.0;
+        auto sineGainDb = [&] (FilterSlot& f, const FilterSlotSettings& st, double hz)
+        {
+            f.prepare ((float) fs);
+            double inSq = 0.0, outSq = 0.0;
+            const int n = 16384;
+            for (int i = 0; i < n; ++i)
+            {
+                const float x = 0.05f * (float) std::sin (2.0 * juce::MathConstants<double>::pi * hz * i / fs);
+                const float y = f.process (x, st, st.cutoffHz);
+                if (i >= n / 2) { inSq += x * x; outSq += y * y; }
+            }
+            return 10.0 * std::log10 (outSq / inSq);
+        };
+
+        // The rate-doubling filters on their own: up then down, nothing in between.
+        {
+            juce::String report;
+            double worst = 0.0;
+            for (double hz : { 1000.0, 10000.0, 15000.0, 19000.0 })
+            {
+                Halfband h;
+                h.design (20000.0 / (2.0 * fs));
+                double inSq = 0.0, outSq = 0.0;
+                for (int i = 0; i < 16384; ++i)
+                {
+                    const float x = (float) std::sin (2.0 * juce::MathConstants<double>::pi * hz * i / fs);
+                    float a, b;
+                    h.up (x, a, b);
+                    const float y = h.down (a, b);
+                    if (i >= 8192) { inSq += x * x; outSq += y * y; }
+                }
+                const double db = 10.0 * std::log10 (outSq / inSq);
+                worst = juce::jmax (worst, std::abs (db));
+                report << juce::String (hz / 1000.0, 0) << " kHz " << juce::String (db, 2) << " dB; ";
+            }
+            check (worst < 0.1, "Oversampling filters are flat to 19 kHz (" + report + ")");
+        }
+
+        // 1. Treble through one slot (OTA 12 dB, cutoff 20 kHz, no resonance):
+        // at 2x and 4x it should follow the filter's own (analogue) curve,
+        // 1 / (1 + (f/fc)^2), with no extra loss from the oversampling.
+        // (Before this fix: 2x was -3.2 dB at 10 kHz and -7.1 dB at 15 kHz.)
+        {
+            FilterSlotSettings st;
+            st.type = FilterType::ota; st.character = 0.75f; st.cutoffHz = 20000.0f; st.resonance = 0.0f; st.levelMatch = false;
+            juce::String report;
+            double worst = 0.0;
+            for (double hz : { 10000.0, 15000.0 })
+            {
+                const double r = hz / 20000.0;
+                const double ideal = 20.0 * std::log10 (1.0 / (1.0 + r * r));
+                FilterSlot b, c;
+                st.oversample = 2; const double g2 = sineGainDb (b, st, hz);
+                st.oversample = 4; const double g4 = sineGainDb (c, st, hz);
+                report << juce::String (hz / 1000.0, 0) << " kHz: ideal " << juce::String (ideal, 1) << ", 2x " << juce::String (g2, 1) << ", 4x " << juce::String (g4, 1) << " dB; ";
+                worst = juce::jmax (worst, std::abs (g2 - ideal), std::abs (g4 - ideal));
+            }
+            check (worst < 0.7, "Oversampling keeps the treble (" + report + ")");
+        }
+
+        // 2. OTA 24 dB: resonance peak is the same height at low and high cutoffs,
+        // and full resonance rings at the cutoff frequency.
+        {
+            FilterSlotSettings st;
+            st.type = FilterType::ota; st.character = 0.0f; st.resonance = 0.7f; st.levelMatch = false; st.oversample = 2;
+            auto peakDb = [&] (float fc)
+            {
+                st.cutoffHz = fc;
+                FilterSlot a, b;
+                return sineGainDb (a, st, fc) - sineGainDb (b, st, fc / 16.0);
+            };
+            const double lo = peakDb (300.0f), hi = peakDb (6000.0f);
+            check (std::abs (lo - hi) < 1.5, "OTA 24 dB resonance is the same at 300 Hz and 6 kHz (" + juce::String (lo, 1) + " vs " + juce::String (hi, 1) + " dB)");
+
+            juce::String report;
+            double worstCents = 0.0;
+            for (float fc : { 500.0f, 2000.0f, 6000.0f })
+            {
+                FilterSlot f;
+                f.prepare ((float) fs);
+                st.cutoffHz = fc; st.resonance = 1.0f;
+                std::vector<float> y (44100);
+                for (int i = 0; i < (int) y.size(); ++i)
+                    y[(size_t) i] = f.process (i < 4 ? 0.2f : 0.0f, st, fc);
+                int crossings = 0, firstC = -1, lastC = -1;
+                for (int i = 22050; i < (int) y.size(); ++i)
+                    if (y[(size_t) i - 1] < 0.0f && y[(size_t) i] >= 0.0f) { ++crossings; if (firstC < 0) firstC = i; lastC = i; }
+                const double hz = crossings > 1 ? (crossings - 1) * fs / (lastC - firstC) : 0.0;
+                const double cents = hz > 0.0 ? 1200.0 * std::log2 (hz / fc) : 9999.0;
+                worstCents = juce::jmax (worstCents, std::abs (cents));
+                report << juce::String (fc, 0) << " Hz rings at " << juce::String (hz, 0) << "; ";
+            }
+            check (worstCents < 35.0, "OTA 24 dB at full resonance rings at the cutoff (" + report + "worst " + juce::String (worstCents, 0) + " cents)");
+        }
+
+        // 3. Zipper noise: a host jumps Cutoff once per 512-sample block on a
+        // resonant filter. Measure the clicks (high-frequency energy) just after
+        // each jump against the level between jumps.
+        {
+            auto p = makeSynth (sr);
+            setParam (*p, ParamIDs::sawLevel, 0.0f);
+            setParam (*p, ParamIDs::sineLevel, 100.0f);
+            setParam (*p, ParamIDs::slot (0, ParamIDs::slotResonance), 85.0f);
+            setParam (*p, ParamIDs::slot (0, ParamIDs::slotEnv), 0.0f);
+            setParam (*p, ParamIDs::slot (0, ParamIDs::slotCharacter), 75.0f); // 12 dB
+            setParam (*p, ParamIDs::drift, 0.0f);
+            juce::AudioBuffer<float> block (2, 512);
+            std::vector<float> out;
+            for (int b = 0; b < 120; ++b)
+            {
+                juce::MidiBuffer midi;
+                if (b == 0) midi.addEvent (juce::MidiMessage::noteOn (1, 45, (juce::uint8) 100), 0);
+                // Cutoff steps between 600 Hz and 1.2 kHz every block, like coarse automation.
+                setParam (*p, ParamIDs::slot (0, ParamIDs::slotCutoff), (b % 2) ? 1200.0f : 600.0f);
+                p->processBlock (block, midi);
+                out.insert (out.end(), block.getReadPointer (0), block.getReadPointer (0) + 512);
+            }
+            // Second difference = high-frequency content.
+            double atJump = 0.0, between = 0.0;
+            for (int b = 40; b < 120; ++b)
+                for (int i = 2; i < 512; ++i)
+                {
+                    const size_t k = (size_t) (b * 512 + i);
+                    const double d = out[k] - 2.0 * out[k - 1] + out[k - 2];
+                    if (i < 48) atJump = juce::jmax (atJump, std::abs (d));
+                    else if (i > 300) between = juce::jmax (between, std::abs (d));
+                }
+            const double ratio = atJump / juce::jmax (1.0e-9, between);
+            check (ratio < 2.0, "No zipper clicks when Cutoff jumps (click / steady = " + juce::String (ratio, 2) + ")");
+        }
+    }
+
     std::cout << (failures == 0 ? "All checks passed" : juce::String (failures) + " check(s) failed") << std::endl;
     return failures == 0 ? 0 : 1;
 }

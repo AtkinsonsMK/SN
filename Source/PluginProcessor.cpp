@@ -64,6 +64,15 @@ void SNSynthProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
         drumVoices[(size_t) d].prepare (d, (float) sampleRate);
     for (auto& f : drumFilters)
         f.prepare ((float) sampleRate);
+    drumSmoothCoef = 1.0f - std::exp (-1.0f / (0.005f * (float) sampleRate));
+    for (int b = 0; b < 3; ++b)
+    {
+        const auto& slot = voiceSettings.slots[b];
+        drumSmooth[(size_t) b] = { std::log2 (juce::jmax (1.0f, slot.cutoffHz)), slot.resonance, slot.drive, slot.character };
+    }
+    for (int d = 0; d < Drums::numDrums; ++d)
+        drumLevelSmooth[(size_t) d] = drumParams[(size_t) d].level->load() * 0.01f;
+    drumEqDb = { voiceSettings.eqLowDb, voiceSettings.eqMidDb, voiceSettings.eqHighDb };
     drumEq.reset();
     sequencer.prepare (sampleRate);
     for (auto& b : drumBus)
@@ -356,11 +365,11 @@ void SNSynthProcessor::renderDrums (int numSamples)
         for (int d = 0; d < Drums::numDrums; ++d)
         {
             auto& v = drumVoices[(size_t) d];
+            const auto& ds = drumSettings[(size_t) d];
+            auto& lvl = drumLevelSmooth[(size_t) d];
+            lvl += (ds.level - lvl) * drumSmoothCoef;
             if (v.isActive())
-            {
-                const auto& ds = drumSettings[(size_t) d];
-                drumBus[(size_t) ds.route][(size_t) i] += v.next() * ds.level * drumGain;
-            }
+                drumBus[(size_t) ds.route][(size_t) i] += v.next() * lvl * drumGain;
         }
 
         // Filter and EQ settings for the drums: the knobs, moved by the LFOs
@@ -390,7 +399,11 @@ void SNSynthProcessor::renderDrums (int numSamples)
                     if (touched[t])
                         applyTarget (drumCur, t, Mod::applyOffset (m, t, offset[t]));
             }
-            drumEq.update (currentSampleRate, drumCur.eqLowDb, drumCur.eqMidDb, drumCur.eqHighDb);
+            const float eqGlide = 1.0f - std::pow (1.0f - drumSmoothCoef, (float) SynthVoice::modInterval);
+            drumEqDb[0] += (drumCur.eqLowDb  - drumEqDb[0]) * eqGlide;
+            drumEqDb[1] += (drumCur.eqMidDb  - drumEqDb[1]) * eqGlide;
+            drumEqDb[2] += (drumCur.eqHighDb - drumEqDb[2]) * eqGlide;
+            drumEq.update (currentSampleRate, drumEqDb[0], drumEqDb[1], drumEqDb[2]);
         }
 
         float x = 0.0f;
@@ -400,8 +413,15 @@ void SNSynthProcessor::renderDrums (int numSamples)
             if (Chain::isFilter (b))
             {
                 x += drumBus[(size_t) (b + 1)][(size_t) i];
-                const auto& slot = drumCur.slots[b];
-                const float hz = std::exp2 (juce::jlimit (4.3f, 14.3f, std::log2 (juce::jmax (1.0f, slot.cutoffHz))));
+                // Smoothed like the voices' filters (no zipper noise).
+                auto slot = drumCur.slots[b];
+                auto& sm = drumSmooth[(size_t) b];
+                sm.oct       += (std::log2 (juce::jmax (1.0f, slot.cutoffHz)) - sm.oct) * drumSmoothCoef;
+                sm.res       += (slot.resonance - sm.res)       * drumSmoothCoef;
+                sm.drive     += (slot.drive     - sm.drive)     * drumSmoothCoef;
+                sm.character += (slot.character - sm.character) * drumSmoothCoef;
+                slot.resonance = sm.res; slot.drive = sm.drive; slot.character = sm.character;
+                const float hz = std::exp2 (juce::jlimit (4.3f, 14.3f, sm.oct));
                 x = drumFilters[(size_t) b].process (x, slot, hz);
             }
             else if (b == Chain::eq && ! drumEq.flat)

@@ -9,7 +9,11 @@
 class Envelope
 {
 public:
-    void setSampleRate (double sr) { sampleRate = sr; }
+    void setSampleRate (double sr)
+    {
+        sampleRate = sr;
+        sustainGlide = 1.0 - std::exp (-1.0 / (0.005 * sr)); // 5 ms
+    }
 
     void setParameters (float attackSec, float decaySec, float sustainLevel, float releaseSec)
     {
@@ -111,7 +115,8 @@ public:
                 break;
 
             case Stage::sustain:
-                value = sustain;
+                // Glide to a new Sustain level over a few ms instead of jumping (no click).
+                value += (sustain - value) * sustainGlide;
                 break;
 
             case Stage::release:
@@ -141,6 +146,7 @@ private:
     static constexpr double decayRatio  = 0.0001;
 
     double sampleRate = 44100.0;
+    double sustainGlide = 0.005;
     Stage  stage = Stage::idle;
     double value = 0.0;
     double startValue = 0.0;
