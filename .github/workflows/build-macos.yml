@@ -11,6 +11,22 @@ permissions:
   contents: write   # needed to attach the installer to a tagged release
 
 jobs:
+  checks:
+    # Quick sound checks on Linux; runs alongside the Mac build.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build tools
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q ninja-build libasound2-dev libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxcomposite-dev libxext-dev libfreetype-dev libfontconfig1-dev
+      - name: Build and run offline checks
+        run: |
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DSN_BUILD_TESTS=ON
+          cmake --build build --target SNSynthTests
+          ./build/SNSynthTests
+
   build:
     runs-on: macos-15-intel   # Intel runner; still builds a universal (Apple Silicon + Intel) binary
     timeout-minutes: 60
