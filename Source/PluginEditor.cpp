@@ -14,14 +14,28 @@ namespace
 SNSynthEditor::SNSynthEditor (SNSynthProcessor& p)
     : AudioProcessorEditor (&p),
       processor (p),
-      scope (p), filterEnvShape (p, true), ampEnvShape (p, false), lfoShape (p), eqCurve (p),
+      scope1 (p, 0), scope2 (p, 1), scopeMix (p, 2), filterEnvShape (p, true), ampEnvShape (p, false), lfoShape (p), eqCurve (p),
+      outputMeter (p),
       keyboard (p.keyboardState, juce::MidiKeyboardComponent::horizontalKeyboard)
 {
     using namespace ParamIDs;
 
-    oscGroup.title = "Oscillator";
-    oscGroup.knobs = { &makeKnob (sawLevel, "Saw"), &makeKnob (pulseLevel, "Pulse"),
-                       &makeKnob (pulseWidth, "Pulse Width"), &makeKnob (subLevel, "Sub") };
+    content.painter = [this] (juce::Graphics& g) { paintContent (g); };
+    addAndMakeVisible (content);
+
+    oscGroup.title = "Oscillator 1";
+    oscGroup.knobs = { &makeKnob (sineLevel, "Sine"), &makeKnob (sawLevel, "Saw"), &makeKnob (pulseLevel, "Pulse"),
+                       &makeKnob (pulseWidth, "Pulse Width"), &makeKnob (osc1Coarse, "Coarse"),
+                       &makeKnob (osc1Fine, "Fine"), &makeKnob (osc1Level, "Level") };
+
+    osc2Group.title = "Oscillator 2";
+    osc2Group.knobs = { &makeKnob (osc2Sine, "Sine"), &makeKnob (osc2Saw, "Saw"), &makeKnob (osc2Pulse, "Pulse"),
+                        &makeKnob (osc2Pw, "Pulse Width"), &makeKnob (osc2Coarse, "Coarse"),
+                        &makeKnob (osc2Fine, "Fine"), &makeKnob (osc2Level, "Level") };
+
+    mixGroup.title = "Mix and Voices";
+    mixGroup.knobs = { &makeKnob (subLevel, "Sub"), &makeKnob (fm1to2, "FM 1 > 2"), &makeKnob (fm2to1, "FM 2 > 1"),
+                       &makeKnob (ringMod, "Ring Mod"), &makeKnob (voices, "Voices") };
 
     filterEnvGroup.title = "Filter Envelope";
     filterEnvGroup.knobs = { &makeKnob (fenvAttack, "Attack"), &makeKnob (fenvDecay, "Decay"),
@@ -50,15 +64,17 @@ SNSynthEditor::SNSynthEditor (SNSynthProcessor& p)
         filterCurves[(size_t) i] = std::make_unique<Vis::FilterCurve> (p, i);
         slots[(size_t) i].group.display = filterCurves[(size_t) i].get();
     }
-    oscGroup.display       = &scope;
+    oscGroup.display       = &scope1;
+    osc2Group.display      = &scope2;
+    mixGroup.display       = &scopeMix;
     filterEnvGroup.display = &filterEnvShape;
     ampEnvGroup.display    = &ampEnvShape;
     movementGroup.display  = &lfoShape;
     eqGroup.display        = &eqCurve;
-    for (auto* group : { &oscGroup, &filterEnvGroup, &ampEnvGroup, &movementGroup, &eqGroup,
+    for (auto* group : { &oscGroup, &osc2Group, &mixGroup, &filterEnvGroup, &ampEnvGroup, &movementGroup, &eqGroup,
                          &slots[0].group, &slots[1].group, &slots[2].group })
     {
-        addAndMakeVisible (group->display);
+        content.addAndMakeVisible (group->display);
         displays.push_back (group->display);
     }
 
@@ -73,7 +89,7 @@ SNSynthEditor::SNSynthEditor (SNSynthProcessor& p)
         numbersWindow->setVisible (true);
         numbersWindow->toFront (false);
     };
-    addAndMakeVisible (numbersButton);
+    content.addAndMakeVisible (numbersButton);
 
     // Computer keyboard: A W S E D F T G Y H U J K O L P ; plays notes.
     // The computer keyboard is handled by the editor itself (see handleKeys), so
@@ -84,13 +100,13 @@ SNSynthEditor::SNSynthEditor (SNSynthProcessor& p)
     keyboard.setKeyWidth (24.0f);
     keyboard.setLowestVisibleKey (48);
     keyboard.setWantsKeyboardFocus (false);
-    addAndMakeVisible (keyboard);
+    content.addAndMakeVisible (keyboard);
 
     for (auto* b : { &octaveDown, &octaveUp })
     {
         b->setWantsKeyboardFocus (false);
         b->setColour (juce::TextButton::buttonColourId, panel);
-        addAndMakeVisible (*b);
+        content.addAndMakeVisible (*b);
     }
     octaveDown.setTooltip ("Computer keyboard: octave down");
     octaveUp.setTooltip ("Computer keyboard: octave up");
@@ -99,17 +115,33 @@ SNSynthEditor::SNSynthEditor (SNSynthProcessor& p)
 
     octaveLabel.setColour (juce::Label::textColourId, accent);
     octaveLabel.setJustificationType (juce::Justification::centredRight);
-    addAndMakeVisible (octaveLabel);
+    content.addAndMakeVisible (octaveLabel);
     updateOctaveLabel();
 
     hintLabel.setText ("Computer keyboard (FL Studio layout): Z S X D C V ... lower octave, Q 2 W 3 E R ... upper octave.",
                        juce::dontSendNotification);
     hintLabel.setColour (juce::Label::textColourId, dimText);
-    addAndMakeVisible (hintLabel);
+    content.addAndMakeVisible (hintLabel);
+
+    outputMeter.setTooltip ("Output level. Bar = average, line = peak. The light turns red if the sound goes over 0 dB; click to reset.");
+    content.addAndMakeVisible (outputMeter);
 
     heldNotes.fill (-1);
     setWantsKeyboardFocus (true);
-    setSize (1060, 850);
+
+    // The whole panel scales. Open at a size that fits the screen, and let
+    // the corner be dragged (the shape stays the same).
+    float scale = 1.0f;
+    if (auto* display = juce::Desktop::getInstance().getDisplays().getPrimaryDisplay())
+    {
+        const auto user = display->userArea;
+        scale = juce::jmin (1.0f, (float) (user.getHeight() - 70) / (float) baseH,
+                                  (float) (user.getWidth() - 40) / (float) baseW);
+    }
+    setResizable (true, true);
+    setResizeLimits (baseW / 2, baseH / 2, baseW * 2, baseH * 2);
+    getConstrainer()->setFixedAspectRatio ((double) baseW / (double) baseH);
+    setSize (juce::roundToInt ((float) baseW * scale), juce::roundToInt ((float) baseH * scale));
     startTimerHz (30);
 }
 
@@ -137,7 +169,7 @@ void SNSynthEditor::setupSlot (SlotPanel& sp, int slotIndex)
     sp.type.setWantsKeyboardFocus (false);
     sp.type.setColour (juce::ComboBox::backgroundColourId, background);
     sp.type.setColour (juce::ComboBox::outlineColourId, juce::Colours::transparentBlack);
-    addAndMakeVisible (sp.type);
+    content.addAndMakeVisible (sp.type);
     sp.typeAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment> (
         processor.parameters, slot (slotIndex, slotType), sp.type);
 
@@ -152,7 +184,7 @@ void SNSynthEditor::setupSlot (SlotPanel& sp, int slotIndex)
     {
         b->setWantsKeyboardFocus (false);
         b->setColour (juce::TextButton::buttonColourId, background);
-        addAndMakeVisible (*b);
+        content.addAndMakeVisible (*b);
     }
     sp.moveLeft.setTooltip ("Move this filter earlier in the chain");
     sp.moveRight.setTooltip ("Move this filter later in the chain");
@@ -248,6 +280,8 @@ void SNSynthEditor::timerCallback()
 
     for (auto* d : displays)
         d->repaint();
+    outputMeter.tick();
+    content.repaint (0, 0, baseW, 60); // "n playing" in the header
 
     for (auto& sp : slots)
         updateSlotTypeDisplay (sp);
@@ -268,7 +302,7 @@ Knob& SNSynthEditor::makeKnob (const juce::String& paramId, const juce::String& 
     k->slider.setColour (juce::Slider::thumbColourId, text);
     k->slider.setColour (juce::Slider::textBoxOutlineColourId, juce::Colours::transparentBlack);
     k->slider.setWantsKeyboardFocus (false);
-    addAndMakeVisible (k->slider);
+    content.addAndMakeVisible (k->slider);
     k->attachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (
         processor.parameters, paramId, k->slider);
 
@@ -276,7 +310,7 @@ Knob& SNSynthEditor::makeKnob (const juce::String& paramId, const juce::String& 
     k->label.setJustificationType (juce::Justification::centred);
     k->label.setColour (juce::Label::textColourId, text);
     k->label.setFont (juce::FontOptions (13.0f));
-    addAndMakeVisible (k->label);
+    content.addAndMakeVisible (k->label);
 
     knobs.push_back (std::move (k));
     return *knobs.back();
@@ -295,7 +329,7 @@ void SNSynthEditor::layoutGroup (KnobGroup& group, juce::Rectangle<int> area, in
     for (auto* k : group.knobs)
     {
         auto cell = inner.removeFromLeft (w);
-        k->label.setBounds (cell.removeFromTop (18));
+        k->label.setBounds (cell.removeFromTop (16));
         k->slider.setBounds (cell.reduced (4, 0));
     }
 }
@@ -405,18 +439,23 @@ void SNSynthEditor::updateOctaveLabel()
 void SNSynthEditor::paint (juce::Graphics& g)
 {
     g.fillAll (background);
+}
 
-    auto header = getLocalBounds().removeFromTop (56).reduced (20, 0);
+void SNSynthEditor::paintContent (juce::Graphics& g)
+{
+    g.fillAll (background);
+
+    auto header = content.getLocalBounds().removeFromTop (56).reduced (20, 0);
     g.setColour (text);
     g.setFont (juce::FontOptions (24.0f, juce::Font::bold));
     g.drawText ("SN Synth", header, juce::Justification::centredLeft);
 
     g.setColour (dimText);
     g.setFont (juce::FontOptions (13.0f));
-    g.drawText ("v" + juce::String (JucePlugin_VersionString) + "  ·  step 4",
+    g.drawText ("v" + juce::String (JucePlugin_VersionString) + "  ·  " + juce::String (processor.getActiveVoiceCount()) + " playing",
                 header.withTrimmedRight (104), juce::Justification::centredRight);
 
-    for (auto* group : { &oscGroup, &filterEnvGroup, &outputGroup, &ampEnvGroup, &movementGroup, &eqGroup,
+    for (auto* group : { &oscGroup, &osc2Group, &mixGroup, &filterEnvGroup, &outputGroup, &ampEnvGroup, &movementGroup, &eqGroup,
                          &slots[0].group, &slots[1].group, &slots[2].group })
     {
         g.setColour (panel);
@@ -442,22 +481,38 @@ void SNSynthEditor::paint (juce::Graphics& g)
 
 void SNSynthEditor::resized()
 {
-    auto area = getLocalBounds().reduced (20);
+    const float scale = (float) getWidth() / (float) baseW;
+    content.setTransform (juce::AffineTransform::scale (scale));
+    content.setBounds (0, 0, baseW, baseH);
+    layoutContent();
+}
+
+void SNSynthEditor::layoutContent()
+{
+    auto area = content.getLocalBounds().reduced (20);
     area.removeFromTop (44);
 
-    numbersButton.setBounds (getWidth() - 20 - 90, 26, 90, 24);
+    numbersButton.setBounds (baseW - 20 - 90, 26, 90, 24);
 
-    const int knobW = 80, rowH = 210, gap = 10;
+    const int rowH = 180, gap = 8;
 
-    // Row 1: oscillator and envelopes
+    // Row 1: the two oscillators
     auto row1 = area.removeFromTop (rowH);
-    layoutGroup (oscGroup,       row1.removeFromLeft (knobW * 4)); row1.removeFromLeft (gap);
-    layoutGroup (filterEnvGroup, row1.removeFromLeft (knobW * 4)); row1.removeFromLeft (gap);
-    layoutGroup (ampEnvGroup,    row1);
+    const int oscW = (row1.getWidth() - gap) / 2;
+    layoutGroup (oscGroup,  row1.removeFromLeft (oscW)); row1.removeFromLeft (gap);
+    layoutGroup (osc2Group, row1);
 
-    // Row 2: the filter rack, slots drawn in processing order
+    // Row 2: mix and voices, envelopes
     area.removeFromTop (gap);
-    auto row2 = area.removeFromTop (rowH + 10);
+    auto row2a = area.removeFromTop (rowH);
+    const int unit = (row2a.getWidth() - 2 * gap) / 13;
+    layoutGroup (mixGroup,       row2a.removeFromLeft (unit * 5)); row2a.removeFromLeft (gap);
+    layoutGroup (filterEnvGroup, row2a.removeFromLeft (unit * 4)); row2a.removeFromLeft (gap);
+    layoutGroup (ampEnvGroup,    row2a);
+
+    // Row 3: the filter rack, slots drawn in processing order
+    area.removeFromTop (gap);
+    auto row2 = area.removeFromTop (rowH + 26);
     const int slotW = (row2.getWidth() - 2 * 14) / 3;
     shownOrder = processor.getSlotOrder();
     for (int pos = 0; pos < 3; ++pos)
@@ -479,14 +534,19 @@ void SNSynthEditor::resized()
         sp.moveRight.setEnabled (pos < 2);
     }
 
-    // Row 3: movement, EQ, output
+    // Row 4: movement, EQ, output (Volume and the level meter)
     area.removeFromTop (gap);
     auto row3 = area.removeFromTop (rowH);
+    const int knobW = 84;
     layoutGroup (movementGroup, row3.removeFromLeft (knobW * 4)); row3.removeFromLeft (gap);
     layoutGroup (eqGroup,       row3.removeFromLeft (knobW * 3)); row3.removeFromLeft (gap);
-    layoutGroup (outputGroup,   row3.removeFromLeft (knobW + 20));
+    auto out = row3.removeFromLeft (knobW + 80);
+    layoutGroup (outputGroup, out.withTrimmedRight (80));
+    outputGroup.bounds = out;
+    outputMeter.setBounds (out.removeFromRight (80).reduced (8, 10).withTrimmedTop (16));
 
-    auto bottom = area.removeFromBottom (110);
+    area.removeFromTop (gap);
+    auto bottom = area;
     auto hintRow = bottom.removeFromTop (24);
     octaveUp.setBounds (hintRow.removeFromRight (26).reduced (0, 1));
     hintRow.removeFromRight (4);

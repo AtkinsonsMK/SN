@@ -31,12 +31,34 @@ namespace Vis
         SNSynthProcessor& processor;
     };
 
-    // Oscillator shape: a still picture of the wave the oscillator settings make.
+    // Oscillator shape: a still picture of the wave the oscillator settings
+    // make. which: 0 = Osc 1, 1 = Osc 2, 2 = the mix of both (with Sub and Ring).
     class Scope : public Display
     {
     public:
-        using Display::Display;
+        Scope (SNSynthProcessor& p, int whichOsc) : Display (p), which (whichOsc) {}
         void paint (juce::Graphics&) override;
+
+    private:
+        int which;
+    };
+
+    // Output level in dB: a bar for the average and a line for the peak,
+    // with a red light that stays on after the sound goes over 0 dB
+    // (click it to reset).
+    class OutputMeter : public juce::Component, public juce::SettableTooltipClient
+    {
+    public:
+        explicit OutputMeter (SNSynthProcessor& p) : processor (p) {}
+        void paint (juce::Graphics&) override;
+        void mouseDown (const juce::MouseEvent&) override;
+        void tick(); // called by the editor about 30 times a second
+
+    private:
+        SNSynthProcessor& processor;
+        float rmsDb = -100.0f, peakDb = -100.0f, holdDb = -100.0f;
+        int holdFrames = 0;
+        bool clip = false;
     };
 
     // Filter response curve for one slot, following the live cutoff.

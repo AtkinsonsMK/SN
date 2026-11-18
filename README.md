@@ -45,10 +45,25 @@ document.
 
 | Group | Control | Range | Default |
 |---|---|---|---|
-| Oscillator | Saw Level | 0 to 100% | 100% |
-| | Pulse Level | 0 to 100% | 0% |
+| Oscillator 1 | Sine | 0 to 100% | 0% |
+| | Saw | 0 to 100% | 100% |
+| | Pulse | 0 to 100% | 0% |
 | | Pulse Width | 5 to 95% | 50% |
-| | Sub Level | 0 to 100% | 0% |
+| | Coarse (tuning in semitones) | -24 to +24 st | 0 st |
+| | Fine (tuning in cents, 100 = one semitone) | -100 to +100 ct | 0 ct |
+| | Level (how much goes to the mix) | 0 to 100% | 100% |
+| Oscillator 2 | Sine | 0 to 100% | 0% |
+| | Saw | 0 to 100% | 100% |
+| | Pulse | 0 to 100% | 0% |
+| | Pulse Width | 5 to 95% | 50% |
+| | Coarse | -24 to +24 st | 0 st |
+| | Fine | -100 to +100 ct | +7 ct (slight detune for width) |
+| | Level | 0 to 100% | 0% (off, so older sounds don't change) |
+| Mix and Voices | Sub (square one octave below Osc 1) | 0 to 100% | 0% |
+| | FM 1 > 2 (Osc 1 bends Osc 2's wave: metallic, bell-like) | 0 to 100% | 0% |
+| | FM 2 > 1 (Osc 2 bends Osc 1's wave) | 0 to 100% | 0% |
+| | Ring Mod (Osc 1 × Osc 2: clangy, bell-like) | 0 to 100% | 0% |
+| | Voices (notes at once; 1 = Mono, legato, newest key wins) | Mono, 2 to 16 | 8 |
 | Filter Envelope | Attack | 0.5 ms to 10 s | 1 ms |
 | | Decay | 1 ms to 10 s | 400 ms |
 | | Sustain | 0 to 100% | 30% |
@@ -71,6 +86,10 @@ document.
 | | Mid (bell 1 kHz) | -12 to +12 dB | 0 dB |
 | | High (shelf 8 kHz) | -12 to +12 dB | 0 dB |
 | Output | Volume | -inf to +6 dB | -6 dB |
+
+The **output meter** next to Volume shows the level in dB: the solid bar is the average, the thin line is the peak, and the white line holds the recent peak. The **CLIP** light turns red if the sound goes over 0 dB and stays on until you click it.
+
+The panel scales: it opens at a size that fits your screen, and you can drag the bottom-right corner to resize it.
 
 Filter slots run in series; the < > buttons on each slot change the order,
 which is saved with the project.

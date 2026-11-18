@@ -6,11 +6,15 @@
 #include "Envelope.h"
 #include "Filters.h"
 #include "LiveInfo.h"
+#include "Oscillator.h"
 
 // Values the processor hands to every voice once per audio block.
 struct VoiceSettings
 {
-    float sawLevel = 1.0f, pulseLevel = 0.0f, pulseWidth = 0.5f, subLevel = 0.0f; // 0..1
+    OscSettings osc[2];
+    float subLevel = 0.0f;                       // 0..1, one octave below Osc 1
+    float fm1to2 = 0.0f, fm2to1 = 0.0f;          // 0..1
+    float ringMod = 0.0f;                        // 0..1
     float fenvA = 0.001f, fenvD = 0.4f, fenvS = 0.3f, fenvR = 0.3f;
     float aenvA = 0.001f, aenvD = 0.3f, aenvS = 1.0f, aenvR = 0.2f;
     float lfoToCutoff = 0.0f; // 0..1
@@ -29,6 +33,8 @@ struct VoiceSettings
 
     const float* lfo = nullptr; // one LFO value (-1..1) per sample of the current block
     double lastNote = -1.0;     // most recent note played, for Glide
+    bool mono = false;          // Voices = 1
+    bool legatoNext = false;    // set by the engine: next startNote is a legato move
 };
 
 struct SynthSound : public juce::SynthesiserSound
@@ -48,6 +54,7 @@ public:
 
     static constexpr float envOctavesAtFull   = 6.0f;  // Env Amount 100% sweeps 6 octaves
     static constexpr float lfoOctavesAtFull   = 3.0f;  // LFO to Cutoff 100% = +/- 3 octaves
+    static constexpr double fmDepthAtFull     = 0.5;   // FM 100% pushes the phase up to half a cycle
 
     SynthVoice (VoiceSettings& s, int voiceIndex) : settings (s), random ((juce::int64) (voiceIndex * 7919 + 17)) {}
 
@@ -75,16 +82,20 @@ public:
 
     void startNote (int midiNote, float velocity, juce::SynthesiserSound*, int pitchWheel) override
     {
-        targetNote = midiNote;
         bendSemitones = wheelToSemitones (pitchWheel);
 
-        const double sr = getSampleRate();
-        if (settings.glideSeconds > 0.0005f && settings.lastNote >= 0.0)
+        if (settings.legatoNext && ampEnv.isActive())
         {
-            currentNote = settings.lastNote;
-            glideStep = (targetNote - currentNote) / (settings.glideSeconds * sr);
-            gliding = std::abs (targetNote - currentNote) > 1.0e-9;
+            legatoTo (midiNote);
+            return;
         }
+
+        targetNote = midiNote;
+        const double sr = getSampleRate();
+        // Poly: every note glides from the last one played. Mono: only
+        // overlapping (legato) notes glide.
+        if (! settings.mono && settings.glideSeconds > 0.0005f && settings.lastNote >= 0.0)
+            glideFrom (settings.lastNote);
         else
         {
             currentNote = targetNote;
@@ -99,12 +110,14 @@ public:
 
         if (! ampEnv.isActive())
         {
-            phase = 0.0;
+            osc1.reset (settings.osc[0]);
+            osc2.reset (settings.osc[1]);
             subPhase = 0.0;
             for (auto& f : filters)
                 f.reset();
-            sSaw = settings.sawLevel; sPulse = settings.pulseLevel;
-            sPw = settings.pulseWidth; sSub = settings.subLevel;
+            sSub = settings.subLevel;
+            sFm12 = settings.fm1to2; sFm21 = settings.fm2to1; sRing = settings.ringMod;
+            sLvl1 = settings.osc[0].level; sLvl2 = settings.osc[1].level;
         }
 
         for (auto& f : filters)
@@ -124,12 +137,33 @@ public:
         }
         else
         {
-            ampEnv.reset();
-            filterEnv.reset();
+            // Stopped to make room for another note (voice stealing): keep
+            // the envelopes where they are, so the new note carries on from
+            // the current level instead of clicking.
             clearCurrentNote();
         }
     }
 
+private:
+    // Mono, legato: move to a new note without restarting the envelopes.
+    // Glide slides there if it's turned up.
+    void legatoTo (int midiNote)
+    {
+        const double from = currentNote;
+        targetNote = midiNote;
+        if (settings.glideSeconds > 0.0005f)
+            glideFrom (from);
+        else
+        {
+            currentNote = targetNote;
+            gliding = false;
+        }
+        settings.lastNote = targetNote;
+        noteSerial = ++settings.noteCounter;
+        settings.newestNote = noteSerial;
+    }
+
+public:
     void pitchWheelMoved (int newValue) override { bendSemitones = wheelToSemitones (newValue); }
     void controllerMoved (int, int) override {}
 
@@ -152,10 +186,12 @@ public:
         for (int i = 0; i < numSamples; ++i)
         {
             // Parameter smoothing (avoids zipper noise when knobs move).
-            sSaw   += (settings.sawLevel   - sSaw)   * smoothCoef;
-            sPulse += (settings.pulseLevel - sPulse) * smoothCoef;
-            sPw    += (settings.pulseWidth - sPw)    * smoothCoef;
-            sSub   += (settings.subLevel   - sSub)   * smoothCoef;
+            sSub   += (settings.subLevel - sSub)   * smoothCoef;
+            sFm12  += (settings.fm1to2   - sFm12)  * smoothCoef;
+            sFm21  += (settings.fm2to1   - sFm21)  * smoothCoef;
+            sRing  += (settings.ringMod  - sRing)  * smoothCoef;
+            sLvl1  += (settings.osc[0].level - sLvl1) * smoothCoef;
+            sLvl2  += (settings.osc[1].level - sLvl2) * smoothCoef;
 
             // Glide
             if (gliding)
@@ -179,10 +215,20 @@ public:
 
             const double pitch = currentNote + bendSemitones + driftSemis;
             const double freq = 440.0 * std::pow (2.0, (pitch - 69.0) / 12.0);
-            const double inc = juce::jmin (freq / sr, 0.45);
+            const double tune1 = std::exp2 (settings.osc[0].tuneSemitones / 12.0);
+            const double tune2 = std::exp2 (settings.osc[1].tuneSemitones / 12.0);
+            const double inc1 = juce::jmin (freq * tune1 / sr, 0.45);
+            const double inc2 = juce::jmin (freq * tune2 / sr, 0.45);
 
-            const float osc = 0.3f * (sSaw * saw (inc) + sPulse * pulse (inc, sPw) + sSub * sub (inc * 0.5));
-            advance (inc);
+            // Each oscillator can push the other's phase (FM). Osc 2 -> 1
+            // uses Osc 2's previous sample, which is how a feedback loop works.
+            const float o1 = osc1.next (inc1, sFm21 * fmDepthAtFull * osc2.getLastOut(), settings.osc[0], smoothCoef);
+            const float o2 = osc2.next (inc2, sFm12 * fmDepthAtFull * o1, settings.osc[1], smoothCoef);
+            const float subOut = sSub > 1.0e-4f ? sub (inc1 * 0.5) : 0.0f;
+            subPhase += inc1 * 0.5;
+            if (subPhase >= 1.0) subPhase -= 1.0;
+
+            const float osc = 0.3f * (sLvl1 * o1 + sSub * subOut + sLvl2 * o2 + sRing * o1 * o2);
 
             // Filter rack: slots in series, in the chosen order.
             const float fenv = filterEnv.next();
@@ -203,7 +249,7 @@ public:
                 filtered = filters[s].process (filtered, slot, lastCutoffHz[s]);
                 if (settings.taps[n + 1] != nullptr) settings.taps[n + 1][pos] += filtered * gain;
             }
-            lastFreq = (float) freq;
+            lastFreq = (float) (freq * tune1);
 
             const float sample = filtered * gain;
 
@@ -255,48 +301,21 @@ private:
         return (wheel - 8192) / 8192.0 * pitchBendRangeSemitones;
     }
 
-    // PolyBLEP: smooths each jump in the waveform so it doesn't alias (sound harsh).
-    static double polyBlep (double t, double dt)
-    {
-        if (t < dt)       { t /= dt;            return t + t - t * t - 1.0; }
-        if (t > 1.0 - dt) { t = (t - 1.0) / dt; return t * t + t + t + 1.0; }
-        return 0.0;
-    }
-
-    float saw (double inc) const
-    {
-        return (float) (2.0 * phase - 1.0 - polyBlep (phase, inc));
-    }
-
-    float pulse (double inc, float width) const
-    {
-        double v = phase < width ? 1.0 : -1.0;
-        v += polyBlep (phase, inc);
-        double t = phase - width;
-        if (t < 0.0) t += 1.0;
-        v -= polyBlep (t, inc);
-        return (float) (v - (2.0 * width - 1.0)); // remove DC so level stays even as width changes
-    }
-
     float sub (double inc) const
     {
         double v = subPhase < 0.5 ? 1.0 : -1.0;
-        v += polyBlep (subPhase, inc);
+        v += Oscillator::polyBlep (subPhase, inc);
         double t = subPhase + 0.5;
         if (t >= 1.0) t -= 1.0;
-        v -= polyBlep (t, inc);
+        v -= Oscillator::polyBlep (t, inc);
         return (float) v;
     }
 
-    void advance (double inc)
+    void glideFrom (double fromNote)
     {
-        phase += inc;
-        if (phase >= 1.0)
-            phase -= 1.0;
-
-        subPhase += inc * 0.5;
-        if (subPhase >= 1.0)
-            subPhase -= 1.0;
+        currentNote = fromNote;
+        glideStep = (targetNote - currentNote) / (settings.glideSeconds * getSampleRate());
+        gliding = std::abs (targetNote - currentNote) > 1.0e-9;
     }
 
     VoiceSettings& settings;
@@ -310,14 +329,15 @@ private:
     double glideStep     = 0.0;
     bool   gliding       = false;
     double bendSemitones = 0.0;
-    double phase = 0.0, subPhase = 0.0;
+    Oscillator osc1, osc2;
+    double subPhase = 0.0;
     float  noteGain = 1.0f;
     int    noteSerial = 0;
     float  lastFreq = 0.0f;
     float  lastCutoffHz[3] = { 1000.0f, 1000.0f, 1000.0f };
 
     float smoothCoef = 0.01f;
-    float sSaw = 1.0f, sPulse = 0.0f, sPw = 0.5f, sSub = 0.0f;
+    float sSub = 0.0f, sFm12 = 0.0f, sFm21 = 0.0f, sRing = 0.0f, sLvl1 = 1.0f, sLvl2 = 0.0f;
 
     float driftCoef = 0.0001f, driftValue = 0.0f, driftTarget = 0.0f;
     int   driftCounter = 0;

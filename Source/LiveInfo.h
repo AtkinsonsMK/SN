@@ -18,6 +18,13 @@ struct LiveInfo
     std::atomic<float> filterEnvLevel { 0.0f }, ampEnvLevel { 0.0f };
     std::atomic<float> lfoPhase { 0.0f };
 
+    // Output meter. outPeak is the loudest sample since the screen last
+    // took it (the screen resets it to 0); outRms is a ~300 ms average.
+    // outClipped stays on until the screen clears it. 1.0 = 0 dB.
+    std::atomic<float> outPeak { 0.0f }, outRms { 0.0f };
+    std::atomic<bool>  outClipped { false };
+    std::atomic<int>   activeVoices { 0 };
+
     // The sound at each stage of the chain, sample by sample:
     // 0 oscillator, 1-3 after each filter position, 4 after EQ, 5 output.
     static constexpr int numStages = 6;

@@ -42,6 +42,9 @@ public:
 
     void paint (juce::Graphics&) override;
     void resized() override;
+
+    // The panel is laid out at this size and scaled to the window.
+    static constexpr int baseW = 1100, baseH = 1000;
     bool keyPressed (const juce::KeyPress&) override;
     bool keyStateChanged (bool isKeyDown) override;
     void visibilityChanged() override;
@@ -49,6 +52,8 @@ public:
 
 private:
     void timerCallback() override;
+    void paintContent (juce::Graphics&);
+    void layoutContent();
     Knob& makeKnob (const juce::String& paramId, const juce::String& label);
     void setupSlot (SlotPanel&, int slotIndex);
     void updateSlotTypeDisplay (SlotPanel&);
@@ -62,12 +67,19 @@ private:
 
     SNSynthProcessor& processor;
 
+    // Everything sits on this, so it can be scaled as one.
+    struct Content : juce::Component
+    {
+        std::function<void (juce::Graphics&)> painter;
+        void paint (juce::Graphics& g) override { if (painter) painter (g); }
+    } content;
+
     std::vector<std::unique_ptr<Knob>> knobs;
-    KnobGroup oscGroup, filterEnvGroup, ampEnvGroup, movementGroup, eqGroup, outputGroup;
+    KnobGroup oscGroup, osc2Group, mixGroup, filterEnvGroup, ampEnvGroup, movementGroup, eqGroup, outputGroup;
     std::array<SlotPanel, 3> slots;
     std::array<int, 3> shownOrder { -1, -1, -1 };
 
-    Vis::Scope scope;
+    Vis::Scope scope1, scope2, scopeMix;
     Vis::EnvelopeShape filterEnvShape, ampEnvShape;
     Vis::LfoShape lfoShape;
     Vis::EqCurve eqCurve;
@@ -77,6 +89,7 @@ private:
     juce::TextButton numbersButton { "Numbers" };
     std::unique_ptr<Vis::NumbersWindow> numbersWindow;
 
+    Vis::OutputMeter outputMeter;
     juce::MidiKeyboardComponent keyboard;
     juce::Label octaveLabel;
     juce::Label hintLabel;

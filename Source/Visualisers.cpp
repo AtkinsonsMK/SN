@@ -117,30 +117,55 @@ namespace
 //==============================================================================
 void Scope::paint (juce::Graphics& g)
 {
-    // A still picture of the wave the oscillator settings make: two cycles, so
-    // the Sub (one octave down) completes one cycle. It only changes when you
-    // change a setting. The live, moving signal is in the Numbers window.
+    // A still picture of the wave: two cycles of Osc 1's pitch, made by
+    // running the same oscillator code the sound uses. It only changes when
+    // you change a setting. The live, moving signal is in the Numbers window.
     paintScreen (g);
     auto r = getLocalBounds().toFloat().reduced (6.0f, 5.0f);
     g.setColour (Colours::grid);
     g.drawHorizontalLine ((int) r.getCentreY(), r.getX(), r.getRight());
 
-    const float saw   = param (ParamIDs::sawLevel)   * 0.01f;
-    const float pulse = param (ParamIDs::pulseLevel) * 0.01f;
-    const float width = param (ParamIDs::pulseWidth) * 0.01f;
-    const float sub   = param (ParamIDs::subLevel)   * 0.01f;
+    OscSettings s[2];
+    s[0].sine  = param (ParamIDs::sineLevel)  * 0.01f;
+    s[0].saw   = param (ParamIDs::sawLevel)   * 0.01f;
+    s[0].pulse = param (ParamIDs::pulseLevel) * 0.01f;
+    s[0].pulseWidth = param (ParamIDs::pulseWidth) * 0.01f;
+    s[0].level = param (ParamIDs::osc1Level)  * 0.01f;
+    s[0].tuneSemitones = param (ParamIDs::osc1Coarse) + param (ParamIDs::osc1Fine) * 0.01f;
+    s[1].sine  = param (ParamIDs::osc2Sine)   * 0.01f;
+    s[1].saw   = param (ParamIDs::osc2Saw)    * 0.01f;
+    s[1].pulse = param (ParamIDs::osc2Pulse)  * 0.01f;
+    s[1].pulseWidth = param (ParamIDs::osc2Pw) * 0.01f;
+    s[1].level = param (ParamIDs::osc2Level)  * 0.01f;
+    s[1].tuneSemitones = param (ParamIDs::osc2Coarse) + param (ParamIDs::osc2Fine) * 0.01f;
+    const float sub  = param (ParamIDs::subLevel) * 0.01f;
+    const float fm12 = param (ParamIDs::fm1to2)  * 0.01f;
+    const float fm21 = param (ParamIDs::fm2to1)  * 0.01f;
+    const float ring = param (ParamIDs::ringMod) * 0.01f;
 
     const int n = juce::jmax (2, (int) r.getWidth());
     std::vector<float> wave ((size_t) n + 1);
+
+    // The picture shows Osc 1's pitch with tuning relative to it, so a
+    // shift on Osc 1 alone doesn't squash the drawing.
+    const double base = 2.0 / (double) n;  // two cycles across the width
+    const double inc1 = base;
+    const double inc2 = base * std::exp2 ((s[1].tuneSemitones - s[0].tuneSemitones) / 12.0);
+    Oscillator o1, o2;
+    o1.reset (s[0]);
+    o2.reset (s[1]);
+    double subPh = 0.0;
     float peak = 0.0f;
     for (int i = 0; i <= n; ++i)
     {
-        const float t = 2.0f * (float) i / (float) n;       // 0..2 cycles
-        const float ph = t - std::floor (t);
-        const float subPh = 0.5f * t;
-        const float v = saw * (2.0f * ph - 1.0f)
-                      + pulse * ((ph < width ? 1.0f : -1.0f) - (2.0f * width - 1.0f))
-                      + sub * (subPh < 0.5f ? 1.0f : -1.0f);
+        const float a = o1.next (inc1, fm21 * SynthVoice::fmDepthAtFull * o2.getLastOut(), s[0], 1.0f);
+        const float b = o2.next (inc2, fm12 * SynthVoice::fmDepthAtFull * a, s[1], 1.0f);
+        float v = 0.0f;
+        if (which == 0)      v = a;
+        else if (which == 1) v = b;
+        else v = s[0].level * a + s[1].level * b + ring * a * b + sub * (subPh < 0.5 ? 1.0f : -1.0f);
+        subPh += inc1 * 0.5;
+        if (subPh >= 1.0) subPh -= 1.0;
         wave[(size_t) i] = v;
         peak = std::max (peak, std::abs (v));
     }
@@ -149,15 +174,18 @@ void Scope::paint (juce::Graphics& g)
     {
         g.setColour (Colours::text);
         g.setFont (11.0f);
-        g.drawText ("all levels at 0", r, juce::Justification::centred);
+        g.drawText (which == 2 ? "all levels at 0" : "no wave turned up", r, juce::Justification::centred);
         return;
     }
 
+    // Each picture fills its screen, except the mix, which is drawn to a
+    // fixed scale so you can see Osc levels change its size.
+    const float scale = which == 2 ? juce::jmax (peak, 1.0f) : peak;
     juce::Path p;
     for (int i = 0; i <= n; ++i)
     {
         const float x = r.getX() + (float) i;
-        const float y = r.getCentreY() - wave[(size_t) i] / peak * r.getHeight() * 0.46f;
+        const float y = r.getCentreY() - wave[(size_t) i] / scale * r.getHeight() * 0.46f;
         if (i == 0) p.startNewSubPath (x, y); else p.lineTo (x, y);
     }
     g.setColour (Colours::trace);
@@ -448,5 +476,96 @@ NumbersWindow::NumbersWindow (SNSynthProcessor& p)
     setContentOwned (new Numbers (p), true);
     setResizable (false, false);
     centreWithSize (getWidth(), getHeight());
+}
+
+//==============================================================================
+namespace
+{
+    constexpr float meterFloorDb = -48.0f, meterTopDb = 6.0f;
+    float toDb (float gain) { return gain > 1.0e-6f ? 20.0f * std::log10 (gain) : -120.0f; }
+}
+
+void OutputMeter::tick()
+{
+    auto& live = processor.live;
+    const float peak = live.outPeak.exchange (0.0f);
+    const float rms  = live.outRms.load();
+    if (live.outClipped.load())
+        clip = true;
+
+    // Peak falls back at about 20 dB a second; the held peak line waits 1.5 s.
+    peakDb = juce::jmax (toDb (peak), peakDb - 0.7f);
+    rmsDb  = toDb (rms);
+    if (peakDb >= holdDb) { holdDb = peakDb; holdFrames = 45; }
+    else if (--holdFrames <= 0) holdDb = juce::jmax (peakDb, holdDb - 1.0f);
+    repaint();
+}
+
+void OutputMeter::mouseDown (const juce::MouseEvent&)
+{
+    clip = false;
+    processor.live.outClipped.store (false);
+    holdDb = peakDb;
+    repaint();
+}
+
+void OutputMeter::paint (juce::Graphics& g)
+{
+    auto r = getLocalBounds().toFloat();
+    auto readout = r.removeFromBottom (16.0f);
+    auto light = r.removeFromTop (14.0f);
+
+    // Clip light
+    g.setColour (clip ? juce::Colour (0xffe0442e) : Colours::grid);
+    g.fillRoundedRectangle (light.reduced (2.0f, 1.0f), 2.0f);
+    g.setColour (clip ? juce::Colours::white : Colours::text);
+    g.setFont (10.0f);
+    g.drawText ("CLIP", light, juce::Justification::centred);
+
+    r.removeFromTop (3.0f);
+    auto bar = r.withSizeKeepingCentre (juce::jmin (18.0f, r.getWidth() * 0.4f), r.getHeight());
+    auto scaleArea = r.withLeft (bar.getRight() + 3.0f);
+    g.setColour (Colours::screen);
+    g.fillRect (bar);
+
+    auto yFor = [&] (float db)
+    {
+        return juce::jmap (juce::jlimit (meterFloorDb, meterTopDb, db), meterFloorDb, meterTopDb, bar.getBottom(), bar.getY());
+    };
+    const float zeroY = yFor (0.0f);
+
+    // Average: solid bar, amber up to 0 dB and red above.
+    const float top = yFor (rmsDb);
+    if (top < bar.getBottom())
+    {
+        g.setColour (Colours::trace);
+        g.fillRect (bar.withTop (juce::jmax (top, zeroY)));
+        if (top < zeroY)
+        {
+            g.setColour (juce::Colour (0xffe0442e));
+            g.fillRect (bar.withTop (top).withBottom (zeroY));
+        }
+    }
+    // Peak: thin line, plus the held peak.
+    g.setColour (peakDb > 0.0f ? juce::Colour (0xffe0442e) : Colours::trace2);
+    g.fillRect (bar.getX(), yFor (peakDb) - 1.0f, bar.getWidth(), 2.0f);
+    g.setColour (holdDb > 0.0f ? juce::Colour (0xffe0442e) : juce::Colours::white.withAlpha (0.8f));
+    g.fillRect (bar.getX(), yFor (holdDb) - 0.5f, bar.getWidth(), 1.0f);
+
+    // Scale marks
+    g.setFont (9.0f);
+    for (float db : { 6.0f, 0.0f, -6.0f, -12.0f, -24.0f, -48.0f })
+    {
+        const float y = yFor (db);
+        g.setColour (db > -0.5f && db < 0.5f ? juce::Colour (0xffe0442e) : Colours::text);
+        g.drawHorizontalLine ((int) y, bar.getRight(), bar.getRight() + 3.0f);
+        g.drawText (juce::String ((int) db), scaleArea.withY (y - 6.0f).withHeight (12.0f).withTrimmedLeft (4.0f),
+                    juce::Justification::centredLeft);
+    }
+
+    g.setColour (holdDb > 0.0f ? juce::Colour (0xffe0442e) : Colours::text);
+    g.setFont (10.0f);
+    g.drawText (holdDb <= -100.0f ? juce::String ("-inf") : juce::String (holdDb, 1) + " dB", readout,
+                juce::Justification::centred);
 }
 }

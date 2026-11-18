@@ -2,12 +2,12 @@
 
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_audio_utils/juce_audio_utils.h>
-#include "SynthVoice.h"
+#include "SynthEngine.h"
 
 class SNSynthProcessor : public juce::AudioProcessor
 {
 public:
-    static constexpr int numVoices = 8;
+    static constexpr int maxVoices = SynthEngine::maxVoices;
 
     SNSynthProcessor();
     ~SNSynthProcessor() override = default;
@@ -39,6 +39,7 @@ public:
     juce::AudioProcessorValueTreeState parameters;
     juce::MidiKeyboardState keyboardState;
     LiveInfo live; // read by the on-screen displays
+    int getActiveVoiceCount() const { return live.activeVoices.load(); }
 
     // Filter slot order (which slot runs first, second, third). Saved with the project.
     std::array<int, 3> getSlotOrder() const;
@@ -59,8 +60,9 @@ private:
     std::array<EqFilter, 2> eqLow, eqMid, eqHigh; // per channel
     float lastEq[3] = { 1000.0f, 1000.0f, 1000.0f };
 
-    juce::Synthesiser synth;
     VoiceSettings voiceSettings;
+    SynthEngine synth { voiceSettings };
+    float meterMeanSquare = 0.0f;
     std::vector<float> lfoBuffer;
     std::array<std::vector<float>, 5> tapBuffers; // osc, 3 filter positions, after EQ
     double lfoPhase = 0.0;

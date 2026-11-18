@@ -13,6 +13,25 @@ namespace ParamIDs
     inline constexpr const char* pulseLevel = "osc_pulse";
     inline constexpr const char* pulseWidth = "osc_pw";
     inline constexpr const char* subLevel   = "osc_sub";
+    inline constexpr const char* sineLevel  = "osc_sine";
+    inline constexpr const char* osc1Coarse = "osc1_coarse";
+    inline constexpr const char* osc1Fine   = "osc1_fine";
+    inline constexpr const char* osc1Level  = "osc1_level";
+
+    // Oscillator 2
+    inline constexpr const char* osc2Sine   = "osc2_sine";
+    inline constexpr const char* osc2Saw    = "osc2_saw";
+    inline constexpr const char* osc2Pulse  = "osc2_pulse";
+    inline constexpr const char* osc2Pw     = "osc2_pw";
+    inline constexpr const char* osc2Coarse = "osc2_coarse";
+    inline constexpr const char* osc2Fine   = "osc2_fine";
+    inline constexpr const char* osc2Level  = "osc2_level";
+
+    // Oscillators together
+    inline constexpr const char* fm1to2  = "fm_1to2";
+    inline constexpr const char* fm2to1  = "fm_2to1";
+    inline constexpr const char* ringMod = "ring";
+    inline constexpr const char* voices  = "voices";
 
     // Filter envelope
     inline constexpr const char* fenvAttack  = "fenv_attack";
@@ -111,6 +130,43 @@ namespace Params
         layout.add (percent (ParamIDs::pulseLevel, "Pulse Level", 0.0f, 100.0f, 0.0f));
         layout.add (percent (ParamIDs::pulseWidth, "Pulse Width", 5.0f, 95.0f,  50.0f));
         layout.add (percent (ParamIDs::subLevel,   "Sub Level",   0.0f, 100.0f, 0.0f));
+
+        // Added in v1.1: Osc 1 extras, Osc 2, FM, Ring Mod, Voices.
+        // Defaults keep older sounds unchanged (Osc 2 level 0).
+        auto semis = [] (const String& id, const String& name)
+        {
+            return std::make_unique<AudioParameterInt> (
+                ParameterID { id, 1 }, name, -24, 24, 0,
+                AudioParameterIntAttributes().withLabel ("st").withStringFromValueFunction (
+                    [] (int v, int) { return (v > 0 ? "+" : "") + String (v) + " st"; }));
+        };
+        auto cents = [] (const String& id, const String& name, float def)
+        {
+            return std::make_unique<AudioParameterFloat> (
+                ParameterID { id, 1 }, name, NormalisableRange<float> (-100.0f, 100.0f, 0.1f), def,
+                AudioParameterFloatAttributes().withLabel ("ct").withStringFromValueFunction (
+                    [] (float v, int) { return (v > 0.04f ? "+" : "") + String (v, 1) + " ct"; }));
+        };
+        layout.add (percent (ParamIDs::sineLevel,  "Osc 1 Sine Level", 0.0f, 100.0f, 0.0f));
+        layout.add (semis   (ParamIDs::osc1Coarse, "Osc 1 Coarse"));
+        layout.add (cents   (ParamIDs::osc1Fine,   "Osc 1 Fine", 0.0f));
+        layout.add (percent (ParamIDs::osc1Level,  "Osc 1 Level", 0.0f, 100.0f, 100.0f));
+
+        layout.add (percent (ParamIDs::osc2Sine,   "Osc 2 Sine Level",  0.0f, 100.0f, 0.0f));
+        layout.add (percent (ParamIDs::osc2Saw,    "Osc 2 Saw Level",   0.0f, 100.0f, 100.0f));
+        layout.add (percent (ParamIDs::osc2Pulse,  "Osc 2 Pulse Level", 0.0f, 100.0f, 0.0f));
+        layout.add (percent (ParamIDs::osc2Pw,     "Osc 2 Pulse Width", 5.0f, 95.0f,  50.0f));
+        layout.add (semis   (ParamIDs::osc2Coarse, "Osc 2 Coarse"));
+        layout.add (cents   (ParamIDs::osc2Fine,   "Osc 2 Fine", 7.0f));
+        layout.add (percent (ParamIDs::osc2Level,  "Osc 2 Level", 0.0f, 100.0f, 0.0f));
+
+        layout.add (percent (ParamIDs::fm1to2,  "FM 1 to 2", 0.0f, 100.0f, 0.0f));
+        layout.add (percent (ParamIDs::fm2to1,  "FM 2 to 1", 0.0f, 100.0f, 0.0f));
+        layout.add (percent (ParamIDs::ringMod, "Ring Mod",  0.0f, 100.0f, 0.0f));
+        layout.add (std::make_unique<AudioParameterInt> (
+            ParameterID { ParamIDs::voices, 1 }, "Voices", 1, 16, 8,
+            AudioParameterIntAttributes().withStringFromValueFunction (
+                [] (int v, int) { return v == 1 ? String ("Mono") : String (v); })));
 
         // Filter envelope (4)
         layout.add (time    (ParamIDs::fenvAttack,  "Filter Attack",  0.0005f, 10.0f, 0.001f, 0.3f));

@@ -16,10 +16,6 @@ SNSynthProcessor::SNSynthProcessor()
     }
     parameters.state.setProperty (StateIDs::slotOrder, "0,1,2", nullptr);
 
-    for (int i = 0; i < numVoices; ++i)
-        synth.addVoice (new SynthVoice (voiceSettings, i));
-
-    synth.addSound (new SynthSound());
 }
 
 float SNSynthProcessor::volumeDbToGain (float db)
@@ -102,6 +98,32 @@ void SNSynthProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
             buffer.getWritePointer (ch)[i] *= g;
     }
 
+    // Output meter: peak (held by the screen) and a ~300 ms average.
+    {
+        float peak = 0.0f, sumSq = 0.0f;
+        for (int ch = 0; ch < numChannels; ++ch)
+        {
+            const auto* d = buffer.getReadPointer (ch);
+            for (int i = 0; i < numSamples; ++i)
+            {
+                peak = juce::jmax (peak, std::abs (d[i]));
+                if (ch == 0) sumSq += d[i] * d[i];
+            }
+        }
+        if (numSamples > 0)
+        {
+            const float blockSeconds = (float) (numSamples / currentSampleRate);
+            const float a = 1.0f - std::exp (-blockSeconds / 0.3f);
+            meterMeanSquare += (sumSq / (float) numSamples - meterMeanSquare) * a;
+        }
+        live.outRms.store (std::sqrt (meterMeanSquare));
+        float prev = live.outPeak.load();
+        while (peak > prev && ! live.outPeak.compare_exchange_weak (prev, peak)) {}
+        if (peak > 1.0f)
+            live.outClipped.store (true);
+        live.activeVoices.store (synth.countActiveVoices());
+    }
+
     // Feed the displays.
     int w = live.writePos.load (std::memory_order_relaxed);
     const float* out = numChannels > 0 ? buffer.getReadPointer (0) : nullptr;
@@ -120,10 +142,27 @@ void SNSynthProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
 void SNSynthProcessor::updateVoiceSettings()
 {
     auto& v = voiceSettings;
-    v.sawLevel    = p (ParamIDs::sawLevel)->load()   * 0.01f;
-    v.pulseLevel  = p (ParamIDs::pulseLevel)->load() * 0.01f;
-    v.pulseWidth  = p (ParamIDs::pulseWidth)->load() * 0.01f;
-    v.subLevel    = p (ParamIDs::subLevel)->load()   * 0.01f;
+    auto& o1 = v.osc[0];
+    o1.sine       = p (ParamIDs::sineLevel)->load()  * 0.01f;
+    o1.saw        = p (ParamIDs::sawLevel)->load()   * 0.01f;
+    o1.pulse      = p (ParamIDs::pulseLevel)->load() * 0.01f;
+    o1.pulseWidth = p (ParamIDs::pulseWidth)->load() * 0.01f;
+    o1.level      = p (ParamIDs::osc1Level)->load()  * 0.01f;
+    o1.tuneSemitones = p (ParamIDs::osc1Coarse)->load() + p (ParamIDs::osc1Fine)->load() * 0.01f;
+
+    auto& o2 = v.osc[1];
+    o2.sine       = p (ParamIDs::osc2Sine)->load()  * 0.01f;
+    o2.saw        = p (ParamIDs::osc2Saw)->load()   * 0.01f;
+    o2.pulse      = p (ParamIDs::osc2Pulse)->load() * 0.01f;
+    o2.pulseWidth = p (ParamIDs::osc2Pw)->load()    * 0.01f;
+    o2.level      = p (ParamIDs::osc2Level)->load() * 0.01f;
+    o2.tuneSemitones = p (ParamIDs::osc2Coarse)->load() + p (ParamIDs::osc2Fine)->load() * 0.01f;
+
+    v.subLevel = p (ParamIDs::subLevel)->load() * 0.01f;
+    v.fm1to2   = p (ParamIDs::fm1to2)->load()   * 0.01f;
+    v.fm2to1   = p (ParamIDs::fm2to1)->load()   * 0.01f;
+    v.ringMod  = p (ParamIDs::ringMod)->load()  * 0.01f;
+    synth.setVoiceLimit ((int) p (ParamIDs::voices)->load());
 
     v.fenvA = p (ParamIDs::fenvAttack)->load();
     v.fenvD = p (ParamIDs::fenvDecay)->load();
