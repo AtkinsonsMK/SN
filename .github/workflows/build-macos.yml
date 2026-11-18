@@ -1,0 +1,57 @@
+name: Build macOS
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write   # needed to attach the installer to a tagged release
+
+jobs:
+  build:
+    runs-on: macos-14
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DSN_BUILD_TESTS=ON
+
+      - name: Build plugin, app and tests
+        run: cmake --build build --config Release --parallel 4 --target SNSynth_All SNSynthTests
+
+      - name: Run offline checks
+        run: ./build/SNSynthTests
+
+      - name: Sign (ad-hoc) so macOS will load the plugins
+        run: |
+          ART="build/SNSynth_artefacts/Release"
+          for b in "$ART/VST3/SN Synth.vst3" "$ART/AU/SN Synth.component" "$ART/Standalone/SN Synth.app"; do
+            codesign --force --deep --sign - "$b"
+          done
+
+      - name: Validate the Audio Unit (auval)
+        run: |
+          mkdir -p ~/Library/Audio/Plug-Ins/Components
+          cp -R "build/SNSynth_artefacts/Release/AU/SN Synth.component" ~/Library/Audio/Plug-Ins/Components/
+          killall -9 AudioComponentRegistrar || true
+          auval -v aumu Sn01 Snau
+
+      - name: Build installer
+        run: ./packaging/make-installer.sh build/SNSynth_artefacts/Release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SN-Synth-macOS
+          path: dist/*
+
+      - name: Attach to release (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes "See README for install steps."
+          gh release upload "$GITHUB_REF_NAME" dist/* --clobber
