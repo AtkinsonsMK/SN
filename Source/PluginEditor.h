@@ -2,6 +2,7 @@
 
 #include "PluginProcessor.h"
 #include "Visualisers.h"
+#include "Theme.h"
 
 class SNSynthEditor;
 struct Knob;
@@ -143,12 +144,14 @@ private:
     void updateHint();
 
     SNSynthProcessor& processor;
+    Theme::LookAndFeel look;
 
     // Everything sits on this, so it can be scaled as one.
     struct Content : juce::Component
     {
         std::function<void (juce::Graphics&)> painter;
         void paint (juce::Graphics& g) override { if (painter) painter (g); }
+        void paintOverChildren (juce::Graphics& g) override { Theme::paintGrain (g, getLocalBounds(), 0.9f); }
     } content;
 
     std::vector<std::unique_ptr<Knob>> knobs;

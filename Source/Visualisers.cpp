@@ -234,7 +234,7 @@ void FilterCurve::paint (juce::Graphics& g)
     fill.lineTo (r.getRight(), r.getBottom());
     fill.lineTo (r.getX(), r.getBottom());
     fill.closeSubPath();
-    g.setColour (Colours::trace.withAlpha (0.15f));
+    g.setColour (Theme::accent.withAlpha (0.22f));
     g.fillPath (fill);
     g.setColour (Colours::trace);
     g.strokePath (path, juce::PathStrokeType (1.6f));
@@ -296,7 +296,7 @@ void EnvelopeShape::paint (juce::Graphics& g)
         case 4: x += xA + xD + xS + xR * juce::jlimit (0.0f, 1.0f, secs / std::max (R, 1.0e-4f)); break;
         default: break;
     }
-    g.setColour (juce::Colours::white);
+    g.setColour (Theme::accent);
     g.fillEllipse (x - 3.5f, yFor (level) - 3.5f, 7.0f, 7.0f);
 }
 
@@ -342,7 +342,7 @@ void LfoShape::paint (juce::Graphics& g)
 
     const float phase = index == 0 ? processor.live.lfoPhase.load() : processor.live.lfo2Phase.load();
     const int xi = juce::jlimit (0, n, (int) (phase * 0.5f * (float) n));
-    g.setColour (juce::Colours::white);
+    g.setColour (Theme::accent);
     g.fillEllipse (r.getX() + (float) xi - 3.5f, r.getCentreY() - v[(size_t) xi] * r.getHeight() * 0.46f - 3.5f, 7.0f, 7.0f);
 }
 
@@ -416,12 +416,12 @@ void Numbers::resized()
 
 void Numbers::paint (juce::Graphics& g)
 {
-    g.fillAll (juce::Colour (0xff1d1f24));
+    g.fillAll (Theme::paper);
     auto area = getLocalBounds().reduced (12);
 
     const double sr = processor.getSampleRate() > 0 ? processor.getSampleRate() : 48000.0;
     auto header = area.removeFromTop (26);
-    g.setColour (juce::Colour (0xffe6e6e6));
+    g.setColour (Theme::ink);
     g.setFont (juce::FontOptions (13.0f));
     g.drawText (juce::String (numRows) + " samples in a row at each stage, each 1/" + juce::String (juce::roundToInt (sr))
                     + " of a second apart (" + juce::String (numRows * 1000.0 / sr, 2) + " ms in total)",
@@ -446,7 +446,7 @@ void Numbers::paint (juce::Graphics& g)
     const int colW = (area.getWidth() - labelW) / LiveInfo::numStages;
     auto titles = area.removeFromTop (20);
     titles.removeFromLeft (labelW);
-    g.setColour (juce::Colour (0xff9aa0a8));
+    g.setColour (Theme::dim);
     g.setFont (juce::FontOptions (11.0f, juce::Font::bold));
     for (int c = 0; c < LiveInfo::numStages; ++c)
         g.drawText (stageNames[c], titles.removeFromLeft (colW).reduced (4, 0), juce::Justification::centredLeft);
@@ -464,7 +464,7 @@ void Numbers::paint (juce::Graphics& g)
     for (int row = 0; row < numRows; ++row)
     {
         auto line = area.removeFromTop (rowH);
-        g.setColour (juce::Colour (0xff5a606a));
+        g.setColour (Theme::grid);
         g.setFont (juce::FontOptions (10.0f));
         g.drawText (juce::String (row + 1), line.removeFromLeft (labelW), juce::Justification::centredLeft);
 
@@ -476,7 +476,7 @@ void Numbers::paint (juce::Graphics& g)
 
             auto textArea = cell.removeFromLeft (62);
             g.setFont (mono);
-            g.setColour (over ? juce::Colour (0xffe0604a) : juce::Colour (0xffe6e6e6));
+            g.setColour (over ? Theme::red : Theme::ink);
             g.drawText ((v >= 0.0f ? "+" : "") + juce::String (v, 4), textArea, juce::Justification::centredRight);
 
             // Bar: centre line is zero, edges are -1 and +1.
@@ -485,12 +485,12 @@ void Numbers::paint (juce::Graphics& g)
             g.fillRect (bar);
             const float cx = bar.getCentreX();
             const float w = juce::jlimit (-1.0f, 1.0f, v / scale) * bar.getWidth() * 0.5f;
-            g.setColour (over ? juce::Colour (0xffe0604a) : (c == 0 ? Colours::trace : Colours::trace2));
+            g.setColour (over ? Theme::red : (c == 0 ? Colours::trace : Colours::trace2));
             g.fillRect (juce::Rectangle<float> (std::min (cx, cx + w), bar.getY(), std::abs (w), bar.getHeight()));
         }
     }
 
-    g.setColour (juce::Colour (0xff9aa0a8));
+    g.setColour (Theme::dim);
     g.setFont (juce::FontOptions (11.0f));
     g.drawText ("Bars: centre is 0, edges are +/-" + juce::String (scale, 2)
                     + ".  Sound runs from -1 to +1; red numbers are beyond that and get squashed (clipped).",
@@ -498,7 +498,7 @@ void Numbers::paint (juce::Graphics& g)
 }
 
 NumbersWindow::NumbersWindow (SNSynthProcessor& p)
-    : juce::DocumentWindow ("SN Synth: Numbers", juce::Colour (0xff1d1f24), juce::DocumentWindow::closeButton)
+    : juce::DocumentWindow ("SN Synth: Numbers", Theme::paper, juce::DocumentWindow::closeButton)
 {
     setUsingNativeTitleBar (true);
     setContentOwned (new Numbers (p), true);
@@ -544,9 +544,9 @@ void OutputMeter::paint (juce::Graphics& g)
     auto light = r.removeFromTop (14.0f);
 
     // Clip light
-    g.setColour (clip ? juce::Colour (0xffe0442e) : Colours::grid);
-    g.fillRoundedRectangle (light.reduced (2.0f, 1.0f), 2.0f);
-    g.setColour (clip ? juce::Colours::white : Colours::text);
+    g.setColour (clip ? Theme::red : Colours::grid);
+    g.fillRect (light.reduced (2.0f, 1.0f));
+    g.setColour (clip ? Theme::paper : Colours::text);
     g.setFont (10.0f);
     g.drawText ("CLIP", light, juce::Justification::centred);
 
@@ -570,14 +570,14 @@ void OutputMeter::paint (juce::Graphics& g)
         g.fillRect (bar.withTop (juce::jmax (top, zeroY)));
         if (top < zeroY)
         {
-            g.setColour (juce::Colour (0xffe0442e));
+            g.setColour (Theme::red);
             g.fillRect (bar.withTop (top).withBottom (zeroY));
         }
     }
     // Peak: thin line, plus the held peak.
-    g.setColour (peakDb > 0.0f ? juce::Colour (0xffe0442e) : Colours::trace2);
+    g.setColour (peakDb > 0.0f ? Theme::red : Colours::trace2);
     g.fillRect (bar.getX(), yFor (peakDb) - 1.0f, bar.getWidth(), 2.0f);
-    g.setColour (holdDb > 0.0f ? juce::Colour (0xffe0442e) : juce::Colours::white.withAlpha (0.8f));
+    g.setColour (holdDb > 0.0f ? Theme::red : Theme::ink);
     g.fillRect (bar.getX(), yFor (holdDb) - 0.5f, bar.getWidth(), 1.0f);
 
     // Scale marks
@@ -585,13 +585,13 @@ void OutputMeter::paint (juce::Graphics& g)
     for (float db : { 6.0f, 0.0f, -6.0f, -12.0f, -24.0f, -48.0f })
     {
         const float y = yFor (db);
-        g.setColour (db > -0.5f && db < 0.5f ? juce::Colour (0xffe0442e) : Colours::text);
+        g.setColour (db > -0.5f && db < 0.5f ? Theme::red : Colours::text);
         g.drawHorizontalLine ((int) y, bar.getRight(), bar.getRight() + 3.0f);
         g.drawText (juce::String ((int) db), scaleArea.withY (y - 6.0f).withHeight (12.0f).withTrimmedLeft (4.0f),
                     juce::Justification::centredLeft);
     }
 
-    g.setColour (holdDb > 0.0f ? juce::Colour (0xffe0442e) : Colours::text);
+    g.setColour (holdDb > 0.0f ? Theme::red : Colours::text);
     g.setFont (10.0f);
     g.drawText (holdDb <= -100.0f ? juce::String ("-inf") : juce::String (holdDb, 1) + " dB", readout,
                 juce::Justification::centred);
