@@ -4,11 +4,11 @@
 
 namespace
 {
-    const juce::Colour background { 0xff1d1f24 };
-    const juce::Colour panel      { 0xff2a2d34 };
-    const juce::Colour accent     { 0xffe8a33d };
-    const juce::Colour text       { 0xffe6e6e6 };
-    const juce::Colour dimText    { 0xff9aa0a8 };
+    const juce::Colour background = Theme::paper;
+    const juce::Colour panel      = Theme::panel;
+    const juce::Colour accent     = Theme::accent;
+    const juce::Colour text       = Theme::ink;
+    const juce::Colour dimText    = Theme::dim;
 }
 
 SNSynthEditor::SNSynthEditor (SNSynthProcessor& p)
@@ -20,6 +20,7 @@ SNSynthEditor::SNSynthEditor (SNSynthProcessor& p)
 {
     using namespace ParamIDs;
 
+    setLookAndFeel (&look);
     content.painter = [this] (juce::Graphics& g) { paintContent (g); };
     addAndMakeVisible (content);
 
@@ -91,7 +92,10 @@ SNSynthEditor::SNSynthEditor (SNSynthProcessor& p)
     numbersButton.onClick = [this]
     {
         if (numbersWindow == nullptr)
+        {
             numbersWindow = std::make_unique<Vis::NumbersWindow> (processor);
+            numbersWindow->setLookAndFeel (&look);
+        }
         numbersWindow->addKeyListener (this); // keep playing while the Numbers window is in front
         numbersWindow->setVisible (true);
         numbersWindow->toFront (false);
@@ -107,6 +111,15 @@ SNSynthEditor::SNSynthEditor (SNSynthProcessor& p)
     keyboard.setKeyWidth (24.0f);
     keyboard.setLowestVisibleKey (48);
     keyboard.setWantsKeyboardFocus (false);
+    keyboard.setColour (juce::MidiKeyboardComponent::whiteNoteColourId, Theme::panel.brighter (0.4f));
+    keyboard.setColour (juce::MidiKeyboardComponent::blackNoteColourId, Theme::ink);
+    keyboard.setColour (juce::MidiKeyboardComponent::keySeparatorLineColourId, Theme::grid.darker (0.2f));
+    keyboard.setColour (juce::MidiKeyboardComponent::keyDownOverlayColourId, Theme::accent);
+    keyboard.setColour (juce::MidiKeyboardComponent::mouseOverKeyOverlayColourId, Theme::accent.withAlpha (0.25f));
+    keyboard.setColour (juce::MidiKeyboardComponent::textLabelColourId, Theme::dim);
+    keyboard.setColour (juce::MidiKeyboardComponent::shadowColourId, juce::Colours::transparentBlack);
+    keyboard.setColour (juce::MidiKeyboardComponent::upDownButtonBackgroundColourId, Theme::panel);
+    keyboard.setColour (juce::MidiKeyboardComponent::upDownButtonArrowColourId, Theme::ink);
     content.addAndMakeVisible (keyboard);
 
     for (auto* b : { &octaveDown, &octaveUp })
@@ -154,13 +167,13 @@ SNSynthEditor::SNSynthEditor (SNSynthProcessor& p)
     oversamplingAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment> (processor.parameters, oversampling, oversamplingBox);
     oversamplingLabel.setText ("Filter oversampling", juce::dontSendNotification);
     oversamplingLabel.setColour (juce::Label::textColourId, dimText);
-    oversamplingLabel.setFont (juce::FontOptions (12.0f));
+    oversamplingLabel.setFont (Theme::label (11.5f));
     content.addAndMakeVisible (oversamplingLabel);
 
     // Modulation sources: pick one, then drag any knob to connect it.
-    modulateLabel.setText ("MODULATE WITH", juce::dontSendNotification);
+    modulateLabel.setText ("Modulate with", juce::dontSendNotification);
     modulateLabel.setColour (juce::Label::textColourId, dimText);
-    modulateLabel.setFont (juce::FontOptions (12.0f, juce::Font::bold));
+    modulateLabel.setFont (Theme::font (12.0f, true));
     modulateLabel.setJustificationType (juce::Justification::centredRight);
     content.addAndMakeVisible (modulateLabel);
     for (int src = 0; src < Mod::numSources; ++src)
@@ -172,7 +185,7 @@ SNSynthEditor::SNSynthEditor (SNSynthProcessor& p)
         b.setColour (juce::TextButton::buttonColourId, panel);
         b.setColour (juce::TextButton::buttonOnColourId, Mod::sourceColour (src));
         b.setColour (juce::TextButton::textColourOffId, Mod::sourceColour (src));
-        b.setColour (juce::TextButton::textColourOnId, background);
+        b.setColour (juce::TextButton::textColourOnId, juce::Colours::white);
         b.setTooltip ("Click, then drag any knob to set how much " + juce::String (Mod::sourceName (src)) + " moves it");
         b.onClick = [this, src] { selectSource (modSource == src ? -1 : src); };
         content.addAndMakeVisible (b);
@@ -201,6 +214,9 @@ SNSynthEditor::SNSynthEditor (SNSynthProcessor& p)
 
 SNSynthEditor::~SNSynthEditor()
 {
+    setLookAndFeel (nullptr);
+    if (numbersWindow != nullptr)
+        numbersWindow->setLookAndFeel (nullptr);
     if (listeningTo != nullptr)
         listeningTo->removeKeyListener (this);
     if (numbersWindow != nullptr)
@@ -222,7 +238,6 @@ void SNSynthEditor::setupSlot (SlotPanel& sp, int slotIndex)
     }
     sp.type.setWantsKeyboardFocus (false);
     sp.type.setColour (juce::ComboBox::backgroundColourId, background);
-    sp.type.setColour (juce::ComboBox::outlineColourId, juce::Colours::transparentBlack);
     content.addAndMakeVisible (sp.type);
     sp.typeAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment> (
         processor.parameters, slot (slotIndex, slotType), sp.type);
@@ -355,6 +370,7 @@ Knob& SNSynthEditor::makeKnob (const juce::String& paramId, const juce::String& 
     k->slider.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 78, 18);
     k->slider.setColour (juce::Slider::rotarySliderFillColourId, accent);
     k->slider.setColour (juce::Slider::thumbColourId, text);
+    k->slider.setColour (juce::Slider::textBoxTextColourId, text);
     k->slider.setColour (juce::Slider::textBoxOutlineColourId, juce::Colours::transparentBlack);
     k->slider.setWantsKeyboardFocus (false);
     content.addAndMakeVisible (k->slider);
@@ -371,8 +387,8 @@ Knob& SNSynthEditor::makeKnob (const juce::String& paramId, const juce::String& 
 
     k->label.setText (labelText, juce::dontSendNotification);
     k->label.setJustificationType (juce::Justification::centred);
-    k->label.setColour (juce::Label::textColourId, text);
-    k->label.setFont (juce::FontOptions (13.0f));
+    k->label.setColour (juce::Label::textColourId, dimText);
+    k->label.setFont (Theme::label (11.5f));
     content.addAndMakeVisible (k->label);
 
     knobs.push_back (std::move (k));
@@ -510,28 +526,36 @@ void SNSynthEditor::paintContent (juce::Graphics& g)
 {
     g.fillAll (background);
 
-    auto header = content.getLocalBounds().removeFromTop (56).reduced (20, 0);
+    auto header = content.getLocalBounds().removeFromTop (60).reduced (20, 0);
     g.setColour (text);
-    g.setFont (juce::FontOptions (24.0f, juce::Font::bold));
+    g.setFont (Theme::font (26.0f, true));
     g.drawText ("SN Synth", header, juce::Justification::centredLeft);
 
     g.setColour (dimText);
-    g.setFont (juce::FontOptions (13.0f));
-    g.drawText ("v" + juce::String (JucePlugin_VersionString) + "  ·  " + juce::String (processor.getActiveVoiceCount()) + " playing",
+    g.setFont (Theme::value (12.0f));
+    g.drawText (juce::String (processor.getActiveVoiceCount()) + " playing",
                 header.withTrimmedRight (104), juce::Justification::centredRight);
+
+    // Strict grid: each panel is a short ink bar and a flush-left title.
+    g.setColour (text.withAlpha (0.5f));
+    for (auto& d : dividers)
+        g.fillRect (d);
 
     KnobGroup modGroup;
     modGroup.title = "Modulation";
     modGroup.bounds = modListBounds;
-    for (auto* group : { &oscGroup, &osc2Group, &mixGroup, &playGroup, &filterEnvGroup, &outputGroup, &ampEnvGroup, &lfo1Group, &lfo2Group, &eqGroup,
-                         &slots[0].group, &slots[1].group, &slots[2].group, &modGroup })
+    KnobGroup chainGroup;
+    chainGroup.title = "Signal chain   (drag to reorder)";
+    chainGroup.bounds = chainBounds;
+    for (auto* group : { &oscGroup, &osc2Group, &playGroup, &mixGroup, &filterEnvGroup, &ampEnvGroup,
+                         &slots[0].group, &slots[1].group, &slots[2].group,
+                         &lfo1Group, &lfo2Group, &eqGroup, &outputGroup, &modGroup, &chainGroup })
     {
-        g.setColour (panel);
-        g.fillRoundedRectangle (group->bounds.toFloat(), 8.0f);
-        g.setColour (dimText);
-        g.setFont (juce::FontOptions (12.0f, juce::Font::bold));
-        g.drawText (group->title.toUpperCase(), group->bounds.reduced (10, 6).removeFromTop (16),
-                    juce::Justification::centredLeft);
+        auto r = group->bounds;
+        g.setColour (text);
+        g.fillRect (r.getX() + 10, r.getY(), 24, 3);
+        g.setFont (Theme::title (13.0f));
+        g.drawText (group->title, r.reduced (10, 0).withTrimmedTop (6).removeFromTop (16), juce::Justification::centredLeft);
     }
 }
 
@@ -560,52 +584,38 @@ void SNSynthEditor::layoutContent()
             b.setBounds (strip.removeFromLeft (w).reduced (2, 0));
     }
 
-    const int rowH = 180, gap = 8;
+    const int rowH = 180, gap = 16;
+    dividers.clear();
+    auto rule = [this] (juce::Rectangle<int> rowArea) // full-width line above a row
+    {
+        dividers.push_back (juce::Rectangle<int> (rowArea.getX(), rowArea.getY() - gap / 2, rowArea.getWidth(), 1));
+    };
+    auto split = [this] (juce::Rectangle<int>& row) // vertical line between panels
+    {
+        dividers.push_back (juce::Rectangle<int> (row.getX() + gap / 2, row.getY(), 1, row.getHeight()));
+        row.removeFromLeft (gap);
+    };
 
-    // Row 1: the two oscillators and playing settings
+    // Row 1: sound sources
+    area.removeFromTop (gap / 2);
     auto row1 = area.removeFromTop (rowH);
+    rule (row1);
     const int unit1 = (row1.getWidth() - 2 * gap) / 17;
-    layoutGroup (oscGroup,  row1.removeFromLeft (unit1 * 7)); row1.removeFromLeft (gap);
-    layoutGroup (osc2Group, row1.removeFromLeft (unit1 * 7)); row1.removeFromLeft (gap);
-    layoutGroup (playGroup, row1);
+    auto r1 = row1;
+    layoutGroup (oscGroup,  r1.removeFromLeft (unit1 * 7)); split (r1);
+    layoutGroup (osc2Group, r1.removeFromLeft (unit1 * 7)); split (r1);
+    layoutGroup (playGroup, r1);
 
-    // Row 2: mix and voices, envelopes
+    // Row 2: mix, amp envelope, EQ and output
     area.removeFromTop (gap);
     auto row2a = area.removeFromTop (rowH);
-    const int unit = (row2a.getWidth() - 2 * gap) / 15;
-    layoutGroup (mixGroup,       row2a.removeFromLeft (unit * 7)); row2a.removeFromLeft (gap);
-    layoutGroup (filterEnvGroup, row2a.removeFromLeft (unit * 4)); row2a.removeFromLeft (gap);
-    layoutGroup (ampEnvGroup,    row2a);
-
-    // The chain: drag blocks to change the processing order.
-    area.removeFromTop (gap);
-    chainStrip.setBounds (area.removeFromTop (34));
-
-    // Row 3: the three filter slots
-    area.removeFromTop (gap);
-    auto row2 = area.removeFromTop (rowH + 26);
-    const int slotW = (row2.getWidth() - 2 * gap) / 3;
-    for (int i = 0; i < 3; ++i)
-    {
-        auto& sp = slots[(size_t) i];
-        auto b = row2.removeFromLeft (slotW);
-        if (i < 2) row2.removeFromLeft (gap);
-
-        layoutGroup (sp.group, b, 26);
-        auto header = b.reduced (8, 6).removeFromTop (20);
-        sp.levelMatch.setBounds (header.removeFromRight (70));
-        sp.type.setBounds (header.withY (header.getY() + 22).withHeight (22).withX (b.getX() + 8).withWidth (b.getWidth() - 16));
-    }
-
-    // Row 4: LFOs, EQ, output (Volume, meter, switches), modulation list
-    area.removeFromTop (gap);
-    auto row3 = area.removeFromTop (rowH);
-    const int knobW = 64;
-    layoutGroup (lfo1Group, row3.removeFromLeft (knobW * 3)); row3.removeFromLeft (gap);
-    layoutGroup (lfo2Group, row3.removeFromLeft (knobW * 3)); row3.removeFromLeft (gap);
-    layoutGroup (eqGroup,   row3.removeFromLeft (knobW * 3)); row3.removeFromLeft (gap);
-    auto out = row3.removeFromLeft (250);
-    row3.removeFromLeft (gap);
+    rule (row2a);
+    const int outW = 250;
+    const int unit = (row2a.getWidth() - outW - 3 * gap) / 14;
+    layoutGroup (mixGroup,    row2a.removeFromLeft (unit * 7)); split (row2a);
+    layoutGroup (ampEnvGroup, row2a.removeFromLeft (unit * 4)); split (row2a);
+    layoutGroup (eqGroup,     row2a.removeFromLeft (unit * 3)); split (row2a);
+    auto out = row2a;
     outputGroup.bounds = out;
     {
         auto inner = out.reduced (6).withTrimmedTop (22);
@@ -614,7 +624,7 @@ void SNSynthEditor::layoutContent()
         vol->label.setBounds (knobArea.removeFromTop (16));
         vol->slider.setBounds (knobArea.removeFromTop (100).reduced (2, 0));
         if (vol->ring != nullptr) vol->ring->setBounds (vol->slider.getBounds());
-        outputMeter.setBounds (inner.removeFromLeft (64).reduced (4, 0));
+        outputMeter.setBounds (inner.removeFromLeft (78).reduced (4, 0));
         inner.removeFromLeft (6);
         limiterButton.setBounds (inner.removeFromTop (24));
         voiceCompButton.setBounds (inner.removeFromTop (24));
@@ -622,10 +632,43 @@ void SNSynthEditor::layoutContent()
         oversamplingLabel.setBounds (inner.removeFromTop (18));
         oversamplingBox.setBounds (inner.removeFromTop (24).withWidth (70));
     }
+
+    // Signal chain: drag blocks to change the processing order.
+    area.removeFromTop (gap);
+    chainBounds = area.removeFromTop (64);
+    rule (chainBounds);
+    chainStrip.setBounds (chainBounds.reduced (10, 0).withTrimmedTop (26).withHeight (34));
+
+    // Row 3: the three filter slots
+    area.removeFromTop (gap);
+    auto row2 = area.removeFromTop (rowH + 26);
+    rule (row2);
+    const int slotW = (row2.getWidth() - 2 * gap) / 3;
+    for (int i = 0; i < 3; ++i)
+    {
+        auto& sp = slots[(size_t) i];
+        auto b = row2.removeFromLeft (slotW);
+        if (i < 2) split (row2);
+
+        layoutGroup (sp.group, b, 26);
+        auto header = b.reduced (8, 6).removeFromTop (20);
+        sp.levelMatch.setBounds (header.removeFromRight (70));
+        sp.type.setBounds (header.withY (header.getY() + 22).withHeight (22).withX (b.getX() + 8).withWidth (b.getWidth() - 16));
+    }
+
+    // Row 4: movement: filter envelope, LFOs and the modulation list
+    area.removeFromTop (gap);
+    auto row3 = area.removeFromTop (rowH);
+    rule (row3);
+    const int knobW = 66;
+    layoutGroup (filterEnvGroup, row3.removeFromLeft (knobW * 4)); split (row3);
+    layoutGroup (lfo1Group,      row3.removeFromLeft (knobW * 3)); split (row3);
+    layoutGroup (lfo2Group,      row3.removeFromLeft (knobW * 3)); split (row3);
     modListBounds = row3;
     modList.setBounds (row3.reduced (6).withTrimmedTop (22));
 
     area.removeFromTop (gap);
+    rule (area);
     auto bottom = area;
     auto hintRow = bottom.removeFromTop (24);
     octaveUp.setBounds (hintRow.removeFromRight (26).reduced (0, 1));
@@ -744,9 +787,9 @@ void ModRing::paint (juce::Graphics& g)
     if (dragging && selected >= 0)
     {
         const float amount = matrix.get (selected, target);
-        g.setColour (juce::Colours::black.withAlpha (0.7f));
+        g.setColour (Theme::ink);
         auto box = juce::Rectangle<float> (54.0f, 18.0f).withCentre (geo.centre);
-        g.fillRoundedRectangle (box, 3.0f);
+        g.fillRect (box);
         g.setColour (Mod::sourceColour (selected));
         g.setFont (12.0f);
         g.drawText ((amount > 0.0f ? "+" : "") + juce::String (juce::roundToInt (amount * 100.0f)) + "%", box, juce::Justification::centred);
@@ -803,7 +846,7 @@ void ModList::refresh()
 
 void ModList::paint (juce::Graphics& g)
 {
-    g.setFont (juce::FontOptions (12.5f));
+    g.setFont (Theme::label (12.0f));
     if (rows.empty())
     {
         g.setColour (dimText);
@@ -900,24 +943,21 @@ void ChainStrip::paint (juce::Graphics& g)
     auto r = getLocalBounds().toFloat();
     const auto& typeNames = Params::filterTypeNames();
 
-    g.setColour (panel);
-    g.fillRoundedRectangle (r, 8.0f);
-
     auto endBox = [&] (juce::Rectangle<float> b, const juce::String& t)
     {
         g.setColour (dimText);
-        g.setFont (juce::FontOptions (12.0f, juce::Font::bold));
+        g.setFont (Theme::font (12.0f, true));
         g.drawText (t, b, juce::Justification::centred);
     };
-    endBox (r.withWidth (chainEndW), "OSCILLATORS");
-    endBox (r.withLeft (r.getRight() - chainEndW), "VOLUME");
+    endBox (r.withWidth (chainEndW), "Oscillators");
+    endBox (r.withLeft (r.getRight() - chainEndW), "Volume");
 
     for (int pos = 0; pos <= Chain::numBlocks; ++pos)
     {
         const float x1 = pos < Chain::numBlocks ? blockBounds (pos).getX() : r.getRight() - chainEndW;
         juce::Path a;
-        a.addArrow ({ x1 - chainArrowW + 4.0f, r.getCentreY(), x1 - 4.0f, r.getCentreY() }, 1.5f, 7.0f, 6.0f);
-        g.setColour (accent);
+        a.addArrow ({ x1 - chainArrowW + 5.0f, r.getCentreY(), x1 - 5.0f, r.getCentreY() }, 1.0f, 6.0f, 5.0f);
+        g.setColour (text);
         g.fillPath (a);
     }
 
@@ -933,23 +973,21 @@ void ChainStrip::paint (juce::Graphics& g)
         if (Chain::isFilter (b))
         {
             const int type = (int) processor.parameters.getRawParameterValue (ParamIDs::slot (b, ParamIDs::slotType))->load();
-            label << "  " << typeNames[type];
+            label << "   " << typeNames[type];
             off = type == FilterType::off;
         }
 
-        g.setColour (pos == dragFrom ? accent.withAlpha (0.25f) : background);
-        g.fillRoundedRectangle (box, 5.0f);
-        g.setColour (pos == dragFrom ? accent : juce::Colour (0xff3a3e47));
-        g.drawRoundedRectangle (box, 5.0f, 1.0f);
-        g.setColour (off ? dimText : text);
-        g.setFont (juce::FontOptions (13.0f));
-        g.drawText (label, box.reduced (8.0f, 0.0f), juce::Justification::centred, true);
+        g.setColour (pos == dragFrom ? accent : Theme::screen);
+        g.fillRect (box);
+        g.setColour (pos == dragFrom ? juce::Colours::white : (off ? dimText : text));
+        g.setFont (Theme::font (12.0f, ! off));
+        g.drawText (label, box.reduced (10.0f, 0.0f), juce::Justification::centredLeft, true);
     }
 
     if (dragFrom >= 0 && dropAt >= 0 && dropAt != dragFrom)
     {
         g.setColour (accent);
-        g.drawRoundedRectangle (blockBounds (dropAt).reduced (1.0f), 5.0f, 2.0f);
+        g.drawRect (blockBounds (dropAt).reduced (1.0f), 2.0f);
     }
 }
 

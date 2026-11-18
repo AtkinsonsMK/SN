@@ -91,7 +91,7 @@ static int saveSnapshot (const juce::File& file)
 
     std::unique_ptr<juce::AudioProcessorEditor> editor (p->createEditor());
     if (auto* ed = dynamic_cast<SNSynthEditor*> (editor.get()))
-        ed->showSourceForSnapshot (Mod::lfo2);
+        ed->showSourceForSnapshot (-1);
     juce::AudioBuffer<float> block (2, 512);
     juce::MidiBuffer m;
     for (int n : { 45, 52, 57 }) m.addEvent (juce::MidiMessage::noteOn (1, n, (juce::uint8) 110), 0);

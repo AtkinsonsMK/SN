@@ -1,6 +1,7 @@
 #pragma once
 
 #include "PluginProcessor.h"
+#include "Theme.h"
 
 // The live displays. Each one reads the synth's settings and the LiveInfo
 // written by the audio, and is repainted by the editor about 30 times a second.
@@ -8,11 +9,11 @@ namespace Vis
 {
     struct Colours
     {
-        static inline const juce::Colour screen  { 0xff15171b };
-        static inline const juce::Colour grid    { 0xff2c3038 };
-        static inline const juce::Colour trace   { 0xffe8a33d };
-        static inline const juce::Colour trace2  { 0xff6fb7c9 };
-        static inline const juce::Colour text    { 0xff9aa0a8 };
+        static inline const juce::Colour screen  = Theme::screen;
+        static inline const juce::Colour grid    = Theme::grid;
+        static inline const juce::Colour trace   = Theme::ink;
+        static inline const juce::Colour trace2  = Theme::trace2;
+        static inline const juce::Colour text    = Theme::dim;
     };
 
     class Display : public juce::Component

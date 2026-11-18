@@ -26,7 +26,7 @@ namespace Mod
 
     inline juce::Colour sourceColour (int s)
     {
-        static const juce::uint32 c[] = { 0xff4fb3d9, 0xff9b7be0, 0xffe8a33d, 0xffe0644a, 0xff6cc489, 0xffd9c34f, 0xffe07bb5 };
+        static const juce::uint32 c[] = { 0xff2f6fd6, 0xff7a4fd1, 0xffc98a00, 0xffc2307a, 0xff2e9a5a, 0xff138f8f, 0xff8c6239 };
         return juce::Colour (c[s]);
     }
 
