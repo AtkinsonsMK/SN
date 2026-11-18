@@ -32,6 +32,10 @@ jobs:
           ./build/SNSynthTests
 
   build:
+    # GitHub's Mac runners have had no capacity since Nov 2026, so the Mac
+    # build only runs when started by hand (Actions tab > Run workflow) or on
+    # a version tag. Day to day, builds are made on M's Mac.
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
     runs-on: macos-15
     timeout-minutes: 60
     steps:
