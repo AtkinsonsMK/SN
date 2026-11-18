@@ -14,6 +14,7 @@ namespace
 SNSynthEditor::SNSynthEditor (SNSynthProcessor& p)
     : AudioProcessorEditor (&p),
       processor (p),
+      scope (p), filterEnvShape (p, true), ampEnvShape (p, false), lfoShape (p), eqCurve (p),
       keyboard (p.keyboardState, juce::MidiKeyboardComponent::horizontalKeyboard)
 {
     using namespace ParamIDs;
@@ -43,13 +44,46 @@ SNSynthEditor::SNSynthEditor (SNSynthProcessor& p)
     for (int i = 0; i < numSlots; ++i)
         setupSlot (slots[(size_t) i], i);
 
+    // Live displays
+    for (int i = 0; i < numSlots; ++i)
+    {
+        filterCurves[(size_t) i] = std::make_unique<Vis::FilterCurve> (p, i);
+        slots[(size_t) i].group.display = filterCurves[(size_t) i].get();
+    }
+    oscGroup.display       = &scope;
+    filterEnvGroup.display = &filterEnvShape;
+    ampEnvGroup.display    = &ampEnvShape;
+    movementGroup.display  = &lfoShape;
+    eqGroup.display        = &eqCurve;
+    for (auto* group : { &oscGroup, &filterEnvGroup, &ampEnvGroup, &movementGroup, &eqGroup,
+                         &slots[0].group, &slots[1].group, &slots[2].group })
+    {
+        addAndMakeVisible (group->display);
+        displays.push_back (group->display);
+    }
+
+    numbersButton.setWantsKeyboardFocus (false);
+    numbersButton.setColour (juce::TextButton::buttonColourId, panel);
+    numbersButton.setTooltip ("Open the Numbers view: the actual sample values at each stage");
+    numbersButton.onClick = [this]
+    {
+        if (numbersWindow == nullptr)
+            numbersWindow = std::make_unique<Vis::NumbersWindow> (processor);
+        numbersWindow->addKeyListener (this); // keep playing while the Numbers window is in front
+        numbersWindow->setVisible (true);
+        numbersWindow->toFront (false);
+    };
+    addAndMakeVisible (numbersButton);
+
     // Computer keyboard: A W S E D F T G Y H U J K O L P ; plays notes.
-    keyboard.setKeyPressBaseOctave (baseOctave);
+    // The computer keyboard is handled by the editor itself (see handleKeys), so
+    // notes keep playing while you click knobs and menus.
+    keyboard.clearKeyMappings();
     keyboard.setOctaveForMiddleC (4);
     keyboard.setAvailableRange (24, 108);
     keyboard.setKeyWidth (24.0f);
     keyboard.setLowestVisibleKey (48);
-    keyboard.setWantsKeyboardFocus (true);
+    keyboard.setWantsKeyboardFocus (false);
     addAndMakeVisible (keyboard);
 
     octaveLabel.setColour (juce::Label::textColourId, accent);
@@ -57,14 +91,24 @@ SNSynthEditor::SNSynthEditor (SNSynthProcessor& p)
     addAndMakeVisible (octaveLabel);
     updateOctaveLabel();
 
-    hintLabel.setText ("Play with A to ; on your computer keyboard.  Z / X: octave down / up.",
+    hintLabel.setText ("Computer keyboard: A S D F G H J K L ; = white keys, W E T Y U O P = black keys.  Z / X octave, C / V velocity.",
                        juce::dontSendNotification);
     hintLabel.setColour (juce::Label::textColourId, dimText);
     addAndMakeVisible (hintLabel);
 
+    heldNotes.fill (-1);
     setWantsKeyboardFocus (true);
-    setSize (1060, 690);
-    startTimerHz (10);
+    setSize (1060, 850);
+    startTimerHz (30);
+}
+
+SNSynthEditor::~SNSynthEditor()
+{
+    if (listeningTo != nullptr)
+        listeningTo->removeKeyListener (this);
+    if (numbersWindow != nullptr)
+        numbersWindow->removeKeyListener (this);
+    processor.keyboardState.allNotesOff (1);
 }
 
 void SNSynthEditor::setupSlot (SlotPanel& sp, int slotIndex)
@@ -170,6 +214,14 @@ void SNSynthEditor::updateSlotTypeDisplay (SlotPanel& sp)
 
 void SNSynthEditor::timerCallback()
 {
+    // Catch key releases that happened while a menu or another window had focus.
+    updateHeldKeys();
+    if (isShowing() && juce::Component::getCurrentlyFocusedComponent() == nullptr)
+        grabKeyboardFocus();
+
+    for (auto* d : displays)
+        d->repaint();
+
     for (auto& sp : slots)
         updateSlotTypeDisplay (sp);
 
@@ -207,6 +259,11 @@ void SNSynthEditor::layoutGroup (KnobGroup& group, juce::Rectangle<int> area, in
 {
     group.bounds = area;
     auto inner = area.reduced (6).withTrimmedTop (22 + topExtra);
+    if (group.display != nullptr)
+    {
+        group.display->setBounds (inner.removeFromTop (54).reduced (4, 0));
+        inner.removeFromTop (6);
+    }
     const int w = inner.getWidth() / (int) group.knobs.size();
     for (auto* k : group.knobs)
     {
@@ -219,38 +276,108 @@ void SNSynthEditor::layoutGroup (KnobGroup& group, juce::Rectangle<int> area, in
 void SNSynthEditor::visibilityChanged()
 {
     if (isShowing())
-        keyboard.grabKeyboardFocus();
+        grabKeyboardFocus();
 }
+
+void SNSynthEditor::parentHierarchyChanged()
+{
+    // Also listen at the window level, so keys still play whatever was clicked last.
+    auto* top = getTopLevelComponent();
+    if (top != listeningTo)
+    {
+        if (listeningTo != nullptr) listeningTo->removeKeyListener (this);
+        listeningTo = top != this ? top : nullptr;
+        if (listeningTo != nullptr) listeningTo->addKeyListener (this);
+    }
+}
+
+// Same layout as Arturia Pigments and Ableton Live:
+// A W S E D F T G Y H U J K O L P ; ' play C up to the F an octave above.
+const char* SNSynthEditor::noteKeys = "awsedftgyhujkolp;'";
 
 bool SNSynthEditor::keyPressed (const juce::KeyPress& key)
 {
+    return handleKeyPress (key);
+}
+
+bool SNSynthEditor::keyStateChanged (bool)
+{
+    return updateHeldKeys();
+}
+
+bool SNSynthEditor::keyPressed (const juce::KeyPress& key, juce::Component*)
+{
+    return handleKeyPress (key);
+}
+
+bool SNSynthEditor::keyStateChanged (bool, juce::Component*)
+{
+    return updateHeldKeys();
+}
+
+bool SNSynthEditor::handleKeyPress (const juce::KeyPress& key)
+{
+    // Leave shortcuts such as Cmd+Q to the app.
+    const auto mods = key.getModifiers();
+    if (mods.isCommandDown() || mods.isCtrlDown() || mods.isAltDown())
+        return false;
+
     const auto c = juce::CharacterFunctions::toLowerCase (key.getTextCharacter());
     if (c == 'z') { shiftOctave (-1); return true; }
     if (c == 'x') { shiftOctave (+1); return true; }
-    return false;
+    if (c == 'c') { changeVelocity (-20); return true; }
+    if (c == 'v') { changeVelocity (+20); return true; }
+
+    updateHeldKeys();
+
+    // Swallow every other plain key, so macOS doesn't play its "bonk" sound.
+    return true;
+}
+
+bool SNSynthEditor::updateHeldKeys()
+{
+    bool any = false;
+    for (int i = 0; noteKeys[i] != 0; ++i)
+    {
+        const bool down = juce::KeyPress ((int) noteKeys[i]).isCurrentlyDown();
+        auto& held = heldNotes[(size_t) i];
+
+        if (down && held < 0)
+        {
+            held = 12 * baseOctave + i;
+            if (held <= 127)
+                processor.keyboardState.noteOn (1, held, (float) velocity / 127.0f);
+            any = true;
+        }
+        else if (! down && held >= 0)
+        {
+            if (held <= 127)
+                processor.keyboardState.noteOff (1, held, 0.0f);
+            held = -1;
+            any = true;
+        }
+    }
+    return any;
 }
 
 void SNSynthEditor::shiftOctave (int delta)
 {
-    const int newOctave = juce::jlimit (2, 8, baseOctave + delta);
-    if (newOctave == baseOctave)
-        return;
+    // Notes already held keep playing until their key is released.
+    baseOctave = juce::jlimit (2, 8, baseOctave + delta);
+    updateOctaveLabel();
+}
 
-    // Release held notes so nothing hangs when the mapping moves.
-    processor.keyboardState.allNotesOff (1);
-    baseOctave = newOctave;
-    keyboard.setKeyPressBaseOctave (baseOctave);
-
-    // Bouncing focus clears the keyboard's record of held keys.
-    grabKeyboardFocus();
-    keyboard.grabKeyboardFocus();
+void SNSynthEditor::changeVelocity (int delta)
+{
+    velocity = juce::jlimit (7, 127, velocity + delta);
     updateOctaveLabel();
 }
 
 void SNSynthEditor::updateOctaveLabel()
 {
     // Shown with the common naming where middle C is C4.
-    octaveLabel.setText ("Keys start at C" + juce::String (baseOctave - 1), juce::dontSendNotification);
+    octaveLabel.setText ("A = C" + juce::String (baseOctave - 1) + "   Velocity " + juce::String (velocity),
+                         juce::dontSendNotification);
 }
 
 void SNSynthEditor::paint (juce::Graphics& g)
@@ -264,8 +391,8 @@ void SNSynthEditor::paint (juce::Graphics& g)
 
     g.setColour (dimText);
     g.setFont (juce::FontOptions (13.0f));
-    g.drawText ("v" + juce::String (JucePlugin_VersionString) + "  ·  step 3",
-                header, juce::Justification::centredRight);
+    g.drawText ("v" + juce::String (JucePlugin_VersionString) + "  ·  step 4",
+                header.withTrimmedRight (104), juce::Justification::centredRight);
 
     for (auto* group : { &oscGroup, &filterEnvGroup, &outputGroup, &ampEnvGroup, &movementGroup, &eqGroup,
                          &slots[0].group, &slots[1].group, &slots[2].group })
@@ -296,7 +423,9 @@ void SNSynthEditor::resized()
     auto area = getLocalBounds().reduced (20);
     area.removeFromTop (44);
 
-    const int knobW = 80, rowH = 150, gap = 10;
+    numbersButton.setBounds (getWidth() - 20 - 90, 26, 90, 24);
+
+    const int knobW = 80, rowH = 210, gap = 10;
 
     // Row 1: oscillator and envelopes
     auto row1 = area.removeFromTop (rowH);

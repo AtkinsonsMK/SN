@@ -58,6 +58,18 @@ namespace FilterMath
     }
 }
 
+// Settings shared by the sound and the on-screen filter curves.
+namespace FilterShape
+{
+    inline float otaFeedback (float res)        { return res * 3.9f; }
+    inline float otaDamping (float res)         { return 2.0f * (1.0f - res * 0.97f); }
+    inline float sallenKeyDamping (float res)   { return 2.0f * (1.0f - res * 1.02f); }
+    inline float gateDamping (float res)        { return 2.0f * (1.0f - res * 0.8f); }
+    inline float sallenKeyHpHz (float ch)       { return 20.0f * std::pow (100.0f, ch); }  // 20 Hz to 2 kHz
+    inline float gateDecaySeconds (float ch)    { return 0.12f * std::pow (25.0f, ch); }   // 0.12 s to 3 s
+    inline bool  otaIs24dB (float ch)           { return ch < 0.5f; }
+}
+
 // One-pole low-pass / high-pass building block.
 struct OnePole
 {
@@ -127,6 +139,8 @@ public:
     }
 
     // True while a Lowpass Gate in this slot is still open.
+    float gate() const { return gateLevel; }
+
     bool gateIsOpen() const { return gateLevel > 1.0e-4f || gateHoldSamples > 0; }
 
     // Process one sample at the host rate.
@@ -165,11 +179,11 @@ private:
         {
             case FilterType::ota:
             {
-                if (s.character < 0.5f)
+                if (FilterShape::otaIs24dB (s.character))
                 {
                     // 24 dB: four cascaded stages with feedback around them,
                     // saturating at the input like an OTA ladder.
-                    const float k = s.resonance * 3.9f;
+                    const float k = FilterShape::otaFeedback (s.resonance);
                     float u = sat (x - k * ladderOut);
                     for (auto& p : poles)
                         u = p.lowpass (u, g);
@@ -178,7 +192,7 @@ private:
                 }
 
                 // 12 dB: smooth 2-pole.
-                const float damping = 2.0f * (1.0f - s.resonance * 0.97f);
+                const float damping = FilterShape::otaDamping (s.resonance);
                 return svf.lowpass (sat (x), g, damping, 2.0f);
             }
 
@@ -187,18 +201,18 @@ private:
                 // MS-20 style: high-pass first (the type knob), then an
                 // aggressive 2-pole low-pass whose resonance can self-oscillate
                 // and is held in check by saturation.
-                const float hpHz = 20.0f * std::pow (100.0f, s.character); // 20 Hz to 2 kHz
+                const float hpHz = FilterShape::sallenKeyHpHz (s.character);
                 const float hg = tptGain (hpHz, osRate);
                 float v = hpPoles[0].highpass (x, hg);
                 v = hpPoles[1].highpass (v, hg);
-                const float damping = 2.0f * (1.0f - s.resonance * 1.02f);
+                const float damping = FilterShape::sallenKeyDamping (s.resonance);
                 return svf.lowpass (sat (v * 1.2f), g, damping, 1.2f);
             }
 
             case FilterType::lowpassGate:
             {
                 // Soft 2-pole with only gentle resonance.
-                const float damping = 2.0f * (1.0f - s.resonance * 0.8f);
+                const float damping = FilterShape::gateDamping (s.resonance);
                 return svf.lowpass (sat (x), g, damping, 0.0f);
             }
 
@@ -219,7 +233,7 @@ private:
             return;
         }
 
-        const float decaySeconds = 0.12f * std::pow (25.0f, character); // 0.12 s to 3 s
+        const float decaySeconds = FilterShape::gateDecaySeconds (character);
         const float rate = (0.6f + 0.8f * gateLevel) / (decaySeconds * sr);
         gateLevel *= std::exp (-rate * 3.0f); // the sound has mostly faded after the set time
         if (gateLevel < 1.0e-5f)

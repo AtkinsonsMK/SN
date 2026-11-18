@@ -39,7 +39,8 @@ juce_add_plugin(SNSynth
 
 target_sources(SNSynth PRIVATE
     Source/PluginProcessor.cpp
-    Source/PluginEditor.cpp)
+    Source/PluginEditor.cpp
+    Source/Visualisers.cpp)
 
 target_include_directories(SNSynth PRIVATE Source)
 

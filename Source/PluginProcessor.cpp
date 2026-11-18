@@ -33,6 +33,9 @@ void SNSynthProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
     currentSampleRate = sampleRate;
     lfoBuffer.assign ((size_t) juce::jmax (samplesPerBlock, 512), 0.0f);
+    for (auto& t : tapBuffers)
+        t.assign ((size_t) juce::jmax (samplesPerBlock, 512), 0.0f);
+    voiceSettings.live = &live;
     voiceSettings.lastNote = -1.0;
     updateVoiceSettings();
     synth.setCurrentPlaybackSampleRate (sampleRate);
@@ -62,9 +65,20 @@ void SNSynthProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
     // Merges notes from the on-screen / computer keyboard into the incoming MIDI.
     keyboardState.processNextMidiBuffer (midi, 0, buffer.getNumSamples(), true);
 
+    const int n = buffer.getNumSamples();
     updateVoiceSettings();
-    renderLfo (buffer.getNumSamples());
-    synth.renderNextBlock (buffer, midi, 0, buffer.getNumSamples());
+    renderLfo (n);
+
+    for (size_t t = 0; t < tapBuffers.size(); ++t)
+    {
+        if ((int) tapBuffers[t].size() < n)
+            tapBuffers[t].resize ((size_t) n); // only if the host exceeds its announced block size
+        std::fill (tapBuffers[t].begin(), tapBuffers[t].begin() + n, 0.0f);
+        if (t < 4)
+            voiceSettings.taps[t] = tapBuffers[t].data();
+    }
+
+    synth.renderNextBlock (buffer, midi, 0, n);
 
     // 3-band EQ
     updateEq();
@@ -74,6 +88,8 @@ void SNSynthProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
         for (int i = 0; i < buffer.getNumSamples(); ++i)
             d[i] = eqHigh[(size_t) ch].processSample (eqMid[(size_t) ch].processSample (eqLow[(size_t) ch].processSample (d[i])));
     }
+    if (buffer.getNumChannels() > 0)
+        std::copy (buffer.getReadPointer (0), buffer.getReadPointer (0) + n, tapBuffers[4].begin());
 
     outputGain.setTargetValue (volumeDbToGain (volumeParam->load()));
     const int numSamples  = buffer.getNumSamples();
@@ -85,6 +101,20 @@ void SNSynthProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
         for (int ch = 0; ch < numChannels; ++ch)
             buffer.getWritePointer (ch)[i] *= g;
     }
+
+    // Feed the displays.
+    int w = live.writePos.load (std::memory_order_relaxed);
+    const float* out = numChannels > 0 ? buffer.getReadPointer (0) : nullptr;
+    for (int i = 0; i < numSamples; ++i)
+    {
+        auto& f = live.ring[(size_t) (w & (LiveInfo::ringSize - 1))];
+        for (size_t t = 0; t < 5; ++t)
+            f.v[t] = tapBuffers[t][(size_t) i];
+        f.v[5] = out != nullptr ? out[i] : 0.0f;
+        ++w;
+    }
+    live.writePos.store (w & 0x3fffffff, std::memory_order_release);
+    live.lfoPhase.store ((float) lfoPhase);
 }
 
 void SNSynthProcessor::updateVoiceSettings()

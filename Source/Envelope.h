@@ -25,24 +25,31 @@ public:
     }
 
     // Retriggering starts from the current level (no click), as analogue envelopes do.
-    void noteOn()  { stage = Stage::attack; }
-    void noteOff() { if (stage != Stage::idle) stage = Stage::release; }
-    void reset()   { stage = Stage::idle; value = 0.0; }
+    void noteOn()  { setStage (Stage::attack); }
+    void noteOff() { if (stage != Stage::idle) setStage (Stage::release); }
+    void reset()   { setStage (Stage::idle); value = 0.0; }
 
     bool isActive() const { return stage != Stage::idle; }
 
+    // For the on-screen envelope display: 0 idle, 1 attack, 2 decay, 3 sustain, 4 release,
+    // and how long the envelope has been in that stage.
+    int    stageIndex() const      { return (int) stage; }
+    double secondsInStage() const  { return samplesInStage / sampleRate; }
+    float  level() const           { return (float) value; }
+
     float next()
     {
+        ++samplesInStage;
         switch (stage)
         {
             case Stage::attack:
                 value = attackBase + value * attackCoef;
-                if (value >= 1.0) { value = 1.0; stage = Stage::decay; }
+                if (value >= 1.0) { value = 1.0; setStage (Stage::decay); }
                 break;
 
             case Stage::decay:
                 value = decayBase + value * decayCoef;
-                if (value <= sustain) { value = sustain; stage = Stage::sustain; }
+                if (value <= sustain) { value = sustain; setStage (Stage::sustain); }
                 break;
 
             case Stage::sustain:
@@ -51,7 +58,7 @@ public:
 
             case Stage::release:
                 value = releaseBase + value * releaseCoef;
-                if (value <= 0.0) { value = 0.0; stage = Stage::idle; }
+                if (value <= 0.0) { value = 0.0; setStage (Stage::idle); }
                 break;
 
             case Stage::idle:
@@ -62,6 +69,8 @@ public:
 
 private:
     enum class Stage { idle, attack, decay, sustain, release };
+
+    void setStage (Stage s) { stage = s; samplesInStage = 0; }
 
     void coefficients (float seconds, double ratio, double& coef, double& base) const
     {
@@ -77,6 +86,7 @@ private:
     Stage  stage = Stage::idle;
     double value = 0.0;
     double sustain = 1.0;
+    double samplesInStage = 0.0;
     double attackCoef = 0.0, attackBase = 0.0;
     double decayCoef = 0.0,  decayBase = 0.0;
     double releaseCoef = 0.0, releaseBase = 0.0;

@@ -3,7 +3,9 @@
 A small analogue-style subtractive synthesizer for macOS, as a standalone app
 and as a VST3 / AU plugin for FL Studio and other DAWs.
 
-**Status: step 3 of 4.** One oscillator (Saw, Pulse, Sub), filter and amp
+**Status: step 4 of 4.** Live displays (scope, filter curves, envelope and
+LFO shapes, EQ curve) and a Numbers window showing the sample values at each
+stage. Under the hood: One oscillator (Saw, Pulse, Sub), filter and amp
 envelopes, an LFO, Drift and Glide, a three-slot filter rack (OTA, Sallen-Key
 and Lowpass Gate so far), a 3-band EQ, 8 voices, and an on-screen keyboard you
 can play from your computer keyboard. 38 controls in all.
@@ -28,9 +30,10 @@ from the plugin list (as a generator). Either the VST3 or the AU version works.
 
 ## Playing
 
-- **Computer keyboard** (standalone app, or with the plugin window focused):
-  `A W S E D F T G Y H U J K O L P ;` play the notes from C upwards;
-  **Z / X** shift down / up an octave.
+- **Computer keyboard** (same layout as Pigments and Ableton Live):
+  white keys `A S D F G H J K L ; '`, black keys `W E T Y U O P`;
+  **Z / X** octave down / up, **C / V** velocity down / up. Notes keep
+  playing while you move knobs and menus with the mouse.
 - **MIDI keyboard**: in the standalone app, click **Options** to choose your
   MIDI input and audio output. In FL Studio, MIDI comes through FL as usual.
 

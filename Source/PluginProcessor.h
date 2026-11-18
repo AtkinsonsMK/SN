@@ -38,6 +38,7 @@ public:
 
     juce::AudioProcessorValueTreeState parameters;
     juce::MidiKeyboardState keyboardState;
+    LiveInfo live; // read by the on-screen displays
 
     // Filter slot order (which slot runs first, second, third). Saved with the project.
     std::array<int, 3> getSlotOrder() const;
@@ -61,6 +62,7 @@ private:
     juce::Synthesiser synth;
     VoiceSettings voiceSettings;
     std::vector<float> lfoBuffer;
+    std::array<std::vector<float>, 5> tapBuffers; // osc, 3 filter positions, after EQ
     double lfoPhase = 0.0;
     double currentSampleRate = 44100.0;
 

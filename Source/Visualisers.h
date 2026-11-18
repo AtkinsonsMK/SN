@@ -1,0 +1,107 @@
+#pragma once
+
+#include "PluginProcessor.h"
+
+// The live displays. Each one reads the synth's settings and the LiveInfo
+// written by the audio, and is repainted by the editor about 30 times a second.
+namespace Vis
+{
+    struct Colours
+    {
+        static inline const juce::Colour screen  { 0xff15171b };
+        static inline const juce::Colour grid    { 0xff2c3038 };
+        static inline const juce::Colour trace   { 0xffe8a33d };
+        static inline const juce::Colour trace2  { 0xff6fb7c9 };
+        static inline const juce::Colour text    { 0xff9aa0a8 };
+    };
+
+    class Display : public juce::Component
+    {
+    public:
+        explicit Display (SNSynthProcessor& p) : processor (p) { setInterceptsMouseClicks (false, false); }
+
+    protected:
+        float param (const juce::String& id) const { return processor.parameters.getRawParameterValue (id)->load(); }
+        void paintScreen (juce::Graphics& g) const
+        {
+            g.setColour (Colours::screen);
+            g.fillRoundedRectangle (getLocalBounds().toFloat(), 4.0f);
+        }
+
+        SNSynthProcessor& processor;
+    };
+
+    // Oscillator scope: two cycles of the newest note, oscillator in orange,
+    // final output in blue, so you can see what the filters did to the shape.
+    class Scope : public Display
+    {
+    public:
+        using Display::Display;
+        void paint (juce::Graphics&) override;
+    };
+
+    // Filter response curve for one slot, following the live cutoff.
+    class FilterCurve : public Display
+    {
+    public:
+        FilterCurve (SNSynthProcessor& p, int slot) : Display (p), slotIndex (slot) {}
+        void paint (juce::Graphics&) override;
+
+    private:
+        int slotIndex;
+    };
+
+    // Envelope shape, with a dot showing where the newest note is.
+    class EnvelopeShape : public Display
+    {
+    public:
+        EnvelopeShape (SNSynthProcessor& p, bool isFilterEnvelope) : Display (p), filterEnv (isFilterEnvelope) {}
+        void paint (juce::Graphics&) override;
+
+    private:
+        bool filterEnv;
+    };
+
+    // LFO triangle with its current position.
+    class LfoShape : public Display
+    {
+    public:
+        using Display::Display;
+        void paint (juce::Graphics&) override;
+    };
+
+    // EQ curve: the combined effect of Low, Mid and High.
+    class EqCurve : public Display
+    {
+    public:
+        using Display::Display;
+        void paint (juce::Graphics&) override;
+    };
+
+    // "Numbers": a frozen snapshot of 16 consecutive samples at each stage.
+    class Numbers : public juce::Component, private juce::Timer
+    {
+    public:
+        explicit Numbers (SNSynthProcessor&);
+        void paint (juce::Graphics&) override;
+        void resized() override;
+        void capture(); // take a new snapshot (keeps the old one if there's no sound)
+
+    private:
+        void timerCallback() override;
+
+        SNSynthProcessor& processor;
+        juce::ToggleButton freeze { "Freeze" };
+        juce::TextButton grab { "Grab now" };
+        static constexpr int numRows = 16;
+        LiveInfo::Frame frames[numRows] {};
+        juce::String stageNames[LiveInfo::numStages];
+    };
+
+    class NumbersWindow : public juce::DocumentWindow
+    {
+    public:
+        explicit NumbersWindow (SNSynthProcessor&);
+        void closeButtonPressed() override { setVisible (false); }
+    };
+}

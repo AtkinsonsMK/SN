@@ -5,6 +5,7 @@
 #include <cmath>
 #include "Envelope.h"
 #include "Filters.h"
+#include "LiveInfo.h"
 
 // Values the processor hands to every voice once per audio block.
 struct VoiceSettings
@@ -18,6 +19,13 @@ struct VoiceSettings
 
     FilterSlotSettings slots[3];
     int order[3] = { 0, 1, 2 };   // processing order of the slots
+
+    // For the displays: per-sample stage outputs summed over all voices
+    // (0 oscillator, 1-3 after each filter position), and live note info.
+    float* taps[4] = { nullptr, nullptr, nullptr, nullptr };
+    LiveInfo* live = nullptr;
+    int noteCounter = 0;   // increases with every note played
+    int newestNote = 0;    // the counter value of the most recent note
 
     const float* lfo = nullptr; // one LFO value (-1..1) per sample of the current block
     double lastNote = -1.0;     // most recent note played, for Glide
@@ -83,6 +91,8 @@ public:
             gliding = false;
         }
         settings.lastNote = targetNote;
+        noteSerial = ++settings.noteCounter;
+        settings.newestNote = noteSerial;
 
         // Velocity: 50% amount, so the softest note is half as loud as the hardest.
         noteGain = (1.0f - velocityAmount) + velocityAmount * velocity;
@@ -179,16 +189,23 @@ public:
             const float lfo = settings.lfo != nullptr ? settings.lfo[startSample + i] : 0.0f;
             const float lfoOct = lfo * settings.lfoToCutoff * lfoOctavesAtFull;
 
+            const float gain = ampEnv.next() * noteGain;
+            const int pos = startSample + i;
+            if (settings.taps[0] != nullptr) settings.taps[0][pos] += osc * gain;
+
             float filtered = osc;
             for (int n = 0; n < 3; ++n)
             {
                 const int s = settings.order[n];
                 const auto& slot = settings.slots[s];
                 const float cutoffOct = baseOct[s] + fenv * slot.envAmount * envOctavesAtFull + lfoOct;
-                filtered = filters[s].process (filtered, slot, std::exp2 (juce::jlimit (4.3f, 14.3f, cutoffOct)));
+                lastCutoffHz[s] = std::exp2 (juce::jlimit (4.3f, 14.3f, cutoffOct));
+                filtered = filters[s].process (filtered, slot, lastCutoffHz[s]);
+                if (settings.taps[n + 1] != nullptr) settings.taps[n + 1][pos] += filtered * gain;
             }
+            lastFreq = (float) freq;
 
-            const float sample = filtered * ampEnv.next() * noteGain;
+            const float sample = filtered * gain;
 
             for (int ch = 0; ch < numChannels; ++ch)
                 output.addSample (ch, startSample + i, sample);
@@ -200,9 +217,33 @@ public:
                 break;
             }
         }
+
+        publishLiveInfo();
     }
 
 private:
+    // The newest note tells the screen what to draw.
+    void publishLiveInfo()
+    {
+        auto* live = settings.live;
+        if (live == nullptr || noteSerial != settings.newestNote)
+            return;
+
+        live->noteActive.store (isVoiceActive());
+        live->noteHz.store (lastFreq);
+        for (int s = 0; s < 3; ++s)
+        {
+            live->liveCutoffHz[s].store (lastCutoffHz[s]);
+            live->gateLevel[s].store (settings.slots[s].type == FilterType::lowpassGate ? filters[s].gate() : 1.0f);
+        }
+        live->filterEnvStage.store (filterEnv.stageIndex());
+        live->filterEnvSeconds.store ((float) filterEnv.secondsInStage());
+        live->filterEnvLevel.store (filterEnv.level());
+        live->ampEnvStage.store (ampEnv.stageIndex());
+        live->ampEnvSeconds.store ((float) ampEnv.secondsInStage());
+        live->ampEnvLevel.store (ampEnv.level());
+    }
+
     void applyEnvelopeSettings()
     {
         ampEnv.setParameters    (settings.aenvA, settings.aenvD, settings.aenvS, settings.aenvR);
@@ -271,6 +312,9 @@ private:
     double bendSemitones = 0.0;
     double phase = 0.0, subPhase = 0.0;
     float  noteGain = 1.0f;
+    int    noteSerial = 0;
+    float  lastFreq = 0.0f;
+    float  lastCutoffHz[3] = { 1000.0f, 1000.0f, 1000.0f };
 
     float smoothCoef = 0.01f;
     float sSaw = 1.0f, sPulse = 0.0f, sPw = 0.5f, sSub = 0.0f;

@@ -3,6 +3,7 @@
 #include "PluginProcessor.h"
 #include "Parameters.h"
 #include "Filters.h"
+#include "PluginEditor.h"
 #include <cmath>
 #include <iostream>
 
@@ -59,10 +60,52 @@ static std::unique_ptr<SNSynthProcessor> makeSynth (double sr)
     return p;
 }
 
-int main()
+// Renders the panel with a chord playing, to check the live displays.
+static int saveSnapshot (const juce::File& file)
+{
+    const double sr = 48000.0;
+    auto p = makeSynth (sr);
+    setParam (*p, ParamIDs::pulseLevel, 60);
+    setParam (*p, ParamIDs::subLevel, 40);
+    setParam (*p, ParamIDs::slot (0, ParamIDs::slotResonance), 55);
+    setParam (*p, ParamIDs::slot (1, ParamIDs::slotType), FilterType::sallenKey);
+    setParam (*p, ParamIDs::slot (1, ParamIDs::slotCharacter), 40);
+    setParam (*p, ParamIDs::slot (1, ParamIDs::slotCutoff), 6000);
+    setParam (*p, ParamIDs::eqLow, 4);
+    setParam (*p, ParamIDs::eqHigh, -6);
+    setParam (*p, ParamIDs::lfoCutoff, 20);
+
+    std::unique_ptr<juce::AudioProcessorEditor> editor (p->createEditor());
+    juce::AudioBuffer<float> block (2, 512);
+    juce::MidiBuffer m;
+    for (int n : { 45, 52, 57 }) m.addEvent (juce::MidiMessage::noteOn (1, n, (juce::uint8) 110), 0);
+    p->processBlock (block, m);
+    juce::MidiBuffer none;
+    for (int i = 0; i < 20; ++i) p->processBlock (block, none);
+
+    auto image = editor->createComponentSnapshot (editor->getLocalBounds(), true, 2.0f);
+    juce::FileOutputStream out (file);
+    out.setPosition (0); out.truncate();
+    juce::PNGImageFormat().writeImageToStream (image, out);
+
+    // And the Numbers view.
+    Vis::Numbers numbers (*p);
+    numbers.setSize (820, 500);
+    numbers.capture();
+    auto img2 = numbers.createComponentSnapshot (numbers.getLocalBounds(), true, 2.0f);
+    juce::FileOutputStream out2 (file.getSiblingFile (file.getFileNameWithoutExtension() + "-numbers.png"));
+    out2.setPosition (0); out2.truncate();
+    juce::PNGImageFormat().writeImageToStream (img2, out2);
+    return 0;
+}
+
+int main (int argc, char** argv)
 {
     juce::ScopedJuceInitialiser_GUI juceInit;
     const double sr = 48000.0;
+
+    if (argc > 2 && juce::String (argv[1]) == "--snapshot")
+        return saveSnapshot (juce::File (juce::String (argv[2])));
 
     {
         SNSynthProcessor p;
