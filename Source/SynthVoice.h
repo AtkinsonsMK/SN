@@ -7,6 +7,7 @@
 #include "Filters.h"
 #include "LiveInfo.h"
 #include "Oscillator.h"
+#include "Modulation.h"
 
 // Values the processor hands to every voice once per audio block.
 struct VoiceSettings
@@ -31,11 +32,69 @@ struct VoiceSettings
     int noteCounter = 0;   // increases with every note played
     int newestNote = 0;    // the counter value of the most recent note
 
-    const float* lfo = nullptr; // one LFO value (-1..1) per sample of the current block
+    const float* lfo[2] = { nullptr, nullptr }; // LFO 1 and 2, one value (-1..1) per sample of the block
+    Mod::Context* mod = nullptr;                // routings and knob positions for modulation
+    float velocityAmount = 0.5f;  // 0..1: how much velocity changes the volume
+    float keyTracking = 0.5f;     // 0..1: how much the filter cutoff follows the note
+    float bendRange = 2.0f;       // semitones
     double lastNote = -1.0;     // most recent note played, for Glide
     bool mono = false;          // Voices = 1
     bool legatoNext = false;    // set by the engine: next startNote is a legato move
 };
+
+// Writes one knob's value (in its own units) into the settings. Used both
+// for the plain knob values and for modulated ones, so they always agree.
+inline void applyTarget (VoiceSettings& v, int t, float x)
+{
+    using namespace Mod;
+    if (t >= f1Cutoff && t <= f3Char)
+    {
+        auto& slot = v.slots[(t - f1Cutoff) / 5];
+        switch ((t - f1Cutoff) % 5)
+        {
+            case 0: slot.cutoffHz  = x; break;
+            case 1: slot.resonance = x * 0.01f; break;
+            case 2: slot.drive     = x * 0.01f; break;
+            case 3: slot.envAmount = x * 0.01f; break;
+            default: slot.character = x * 0.01f; break;
+        }
+        return;
+    }
+    auto& o1 = v.osc[0];
+    auto& o2 = v.osc[1];
+    switch (t)
+    {
+        case osc1Sine:   o1.sine = x * 0.01f; break;
+        case osc1Saw:    o1.saw = x * 0.01f; break;
+        case osc1Pulse:  o1.pulse = x * 0.01f; break;
+        case osc1Pw:     o1.pulseWidth = x * 0.01f; break;
+        case osc1Coarse: o1.coarse = x; break;
+        case osc1Fine:   o1.fine = x; break;
+        case osc1Level:  o1.level = x * 0.01f; break;
+        case osc2Sine:   o2.sine = x * 0.01f; break;
+        case osc2Saw:    o2.saw = x * 0.01f; break;
+        case osc2Pulse:  o2.pulse = x * 0.01f; break;
+        case osc2Pw:     o2.pulseWidth = x * 0.01f; break;
+        case osc2Coarse: o2.coarse = x; break;
+        case osc2Fine:   o2.fine = x; break;
+        case osc2Level:  o2.level = x * 0.01f; break;
+        case sub:        v.subLevel = x * 0.01f; break;
+        case fm12:       v.fm1to2 = x * 0.01f; break;
+        case fm21:       v.fm2to1 = x * 0.01f; break;
+        case ring:       v.ringMod = x * 0.01f; break;
+        case fenvA:      v.fenvA = x; break;
+        case fenvD:      v.fenvD = x; break;
+        case fenvS:      v.fenvS = x * 0.01f; break;
+        case fenvR:      v.fenvR = x; break;
+        case aenvA:      v.aenvA = x; break;
+        case aenvD:      v.aenvD = x; break;
+        case aenvS:      v.aenvS = x * 0.01f; break;
+        case aenvR:      v.aenvR = x; break;
+        case Mod::drift: v.drift = x * 0.01f; break;
+        case Mod::glide: v.glideSeconds = x; break;
+        default: break; // EQ and Volume are handled by the processor
+    }
+}
 
 struct SynthSound : public juce::SynthesiserSound
 {
@@ -46,17 +105,14 @@ struct SynthSound : public juce::SynthesiserSound
 class SynthVoice : public juce::SynthesiserVoice
 {
 public:
-    // Fixed for now (see "Fixed for now" in the sound concept doc).
-    static constexpr double pitchBendRangeSemitones = 2.0;
-    static constexpr float  velocityAmount          = 0.5f;
-    static constexpr float  keyTracking             = 0.5f;
     static constexpr float  maxDriftCents           = 10.0f;
+    static constexpr int    modInterval             = 16; // modulation is updated every 16 samples
 
     static constexpr float envOctavesAtFull   = 6.0f;  // Env Amount 100% sweeps 6 octaves
     static constexpr float lfoOctavesAtFull   = 3.0f;  // LFO to Cutoff 100% = +/- 3 octaves
     static constexpr double fmDepthAtFull     = 0.5;   // FM 100% pushes the phase up to half a cycle
 
-    SynthVoice (VoiceSettings& s, int voiceIndex) : settings (s), random ((juce::int64) (voiceIndex * 7919 + 17)) {}
+    SynthVoice (VoiceSettings& s, int voiceIndex) : shared (s), cur (s), random ((juce::int64) (voiceIndex * 7919 + 17)) {}
 
     bool canPlaySound (juce::SynthesiserSound* s) override
     {
@@ -84,7 +140,7 @@ public:
     {
         bendSemitones = wheelToSemitones (pitchWheel);
 
-        if (settings.legatoNext && ampEnv.isActive())
+        if (shared.legatoNext && ampEnv.isActive())
         {
             legatoTo (midiNote);
             return;
@@ -94,36 +150,37 @@ public:
         const double sr = getSampleRate();
         // Poly: every note glides from the last one played. Mono: only
         // overlapping (legato) notes glide.
-        if (! settings.mono && settings.glideSeconds > 0.0005f && settings.lastNote >= 0.0)
-            glideFrom (settings.lastNote);
+        if (! shared.mono && shared.glideSeconds > 0.0005f && shared.lastNote >= 0.0)
+            glideFrom (shared.lastNote);
         else
         {
             currentNote = targetNote;
             gliding = false;
         }
-        settings.lastNote = targetNote;
-        noteSerial = ++settings.noteCounter;
-        settings.newestNote = noteSerial;
+        shared.lastNote = targetNote;
+        noteSerial = ++shared.noteCounter;
+        shared.newestNote = noteSerial;
 
-        // Velocity: 50% amount, so the softest note is half as loud as the hardest.
-        noteGain = (1.0f - velocityAmount) + velocityAmount * velocity;
+        // Velocity to Volume: at 50% the softest note is half as loud as the hardest.
+        noteVelocity = velocity;
+        noteGain = (1.0f - shared.velocityAmount) + shared.velocityAmount * velocity;
 
         if (! ampEnv.isActive())
         {
-            osc1.reset (settings.osc[0]);
-            osc2.reset (settings.osc[1]);
+            osc1.reset (shared.osc[0]);
+            osc2.reset (shared.osc[1]);
             subPhase = 0.0;
             for (auto& f : filters)
                 f.reset();
-            sSub = settings.subLevel;
-            sFm12 = settings.fm1to2; sFm21 = settings.fm2to1; sRing = settings.ringMod;
-            sLvl1 = settings.osc[0].level; sLvl2 = settings.osc[1].level;
+            sSub = shared.subLevel;
+            sFm12 = shared.fm1to2; sFm21 = shared.fm2to1; sRing = shared.ringMod;
+            sLvl1 = shared.osc[0].level; sLvl2 = shared.osc[1].level;
         }
 
         for (auto& f : filters)
             f.trigger ((float) sr);
 
-        applyEnvelopeSettings();
+        refreshSettings (0);
         ampEnv.noteOn();
         filterEnv.noteOn();
     }
@@ -151,16 +208,16 @@ private:
     {
         const double from = currentNote;
         targetNote = midiNote;
-        if (settings.glideSeconds > 0.0005f)
+        if (shared.glideSeconds > 0.0005f)
             glideFrom (from);
         else
         {
             currentNote = targetNote;
             gliding = false;
         }
-        settings.lastNote = targetNote;
-        noteSerial = ++settings.noteCounter;
-        settings.newestNote = noteSerial;
+        shared.lastNote = targetNote;
+        noteSerial = ++shared.noteCounter;
+        shared.newestNote = noteSerial;
     }
 
 public:
@@ -174,24 +231,34 @@ public:
         if (! isVoiceActive())
             return;
 
-        applyEnvelopeSettings();
-
         const double sr = getSampleRate();
         const int numChannels = output.getNumChannels();
-        const float keyTrackOct = keyTracking * (float) (targetNote - 60) / 12.0f;
-        float baseOct[3];
-        for (int s = 0; s < 3; ++s)
-            baseOct[s] = std::log2 (settings.slots[s].cutoffHz) + keyTrackOct;
+        float baseOct[3] {};
+        double tune1 = 1.0, tune2 = 1.0;
 
         for (int i = 0; i < numSamples; ++i)
         {
+            const int pos = startSample + i;
+
+            // Every 16 samples: take this voice's copy of the knobs and apply
+            // its modulation (LFOs, envelopes, velocity, mod wheel, key).
+            if (i % modInterval == 0)
+            {
+                refreshSettings (pos);
+                const float keyTrackOct = cur.keyTracking * (float) (currentNote - 60.0) / 12.0f; // follows Glide
+                for (int s = 0; s < 3; ++s)
+                    baseOct[s] = std::log2 (cur.slots[s].cutoffHz) + keyTrackOct;
+                tune1 = std::exp2 (cur.osc[0].tuneSemitones() / 12.0);
+                tune2 = std::exp2 (cur.osc[1].tuneSemitones() / 12.0);
+            }
+
             // Parameter smoothing (avoids zipper noise when knobs move).
-            sSub   += (settings.subLevel - sSub)   * smoothCoef;
-            sFm12  += (settings.fm1to2   - sFm12)  * smoothCoef;
-            sFm21  += (settings.fm2to1   - sFm21)  * smoothCoef;
-            sRing  += (settings.ringMod  - sRing)  * smoothCoef;
-            sLvl1  += (settings.osc[0].level - sLvl1) * smoothCoef;
-            sLvl2  += (settings.osc[1].level - sLvl2) * smoothCoef;
+            sSub   += (cur.subLevel - sSub)   * smoothCoef;
+            sFm12  += (cur.fm1to2   - sFm12)  * smoothCoef;
+            sFm21  += (cur.fm2to1   - sFm21)  * smoothCoef;
+            sRing  += (cur.ringMod  - sRing)  * smoothCoef;
+            sLvl1  += (cur.osc[0].level - sLvl1) * smoothCoef;
+            sLvl2  += (cur.osc[1].level - sLvl2) * smoothCoef;
 
             // Glide
             if (gliding)
@@ -211,19 +278,17 @@ public:
                 driftCounter = (int) (sr * (0.3 + 0.7 * random.nextFloat()));
             }
             driftValue += (driftTarget - driftValue) * driftCoef;
-            const double driftSemis = settings.drift * maxDriftCents * driftValue / 100.0;
+            const double driftSemis = cur.drift * maxDriftCents * driftValue / 100.0;
 
-            const double pitch = currentNote + bendSemitones + driftSemis;
+            const double pitch = currentNote + bendSemitones * cur.bendRange + driftSemis;
             const double freq = 440.0 * std::pow (2.0, (pitch - 69.0) / 12.0);
-            const double tune1 = std::exp2 (settings.osc[0].tuneSemitones / 12.0);
-            const double tune2 = std::exp2 (settings.osc[1].tuneSemitones / 12.0);
             const double inc1 = juce::jmin (freq * tune1 / sr, 0.45);
             const double inc2 = juce::jmin (freq * tune2 / sr, 0.45);
 
             // Each oscillator can push the other's phase (FM). Osc 2 -> 1
             // uses Osc 2's previous sample, which is how a feedback loop works.
-            const float o1 = osc1.next (inc1, sFm21 * fmDepthAtFull * osc2.getLastOut(), settings.osc[0], smoothCoef);
-            const float o2 = osc2.next (inc2, sFm12 * fmDepthAtFull * o1, settings.osc[1], smoothCoef);
+            const float o1 = osc1.next (inc1, sFm21 * fmDepthAtFull * osc2.getLastOut(), cur.osc[0], smoothCoef);
+            const float o2 = osc2.next (inc2, sFm12 * fmDepthAtFull * o1, cur.osc[1], smoothCoef);
             const float subOut = sSub > 1.0e-4f ? sub (inc1 * 0.5) : 0.0f;
             subPhase += inc1 * 0.5;
             if (subPhase >= 1.0) subPhase -= 1.0;
@@ -232,29 +297,28 @@ public:
 
             // Filter rack: slots in series, in the chosen order.
             const float fenv = filterEnv.next();
-            const float lfo = settings.lfo != nullptr ? settings.lfo[startSample + i] : 0.0f;
-            const float lfoOct = lfo * settings.lfoToCutoff * lfoOctavesAtFull;
+            const float lfo = cur.lfo[0] != nullptr ? cur.lfo[0][pos] : 0.0f;
+            const float lfoOct = lfo * cur.lfoToCutoff * lfoOctavesAtFull; // older projects' "LFO to Cutoff"
 
             const float gain = ampEnv.next() * noteGain;
-            const int pos = startSample + i;
-            if (settings.taps[0] != nullptr) settings.taps[0][pos] += osc * gain;
+            if (cur.taps[0] != nullptr) cur.taps[0][pos] += osc * gain;
 
             float filtered = osc;
             for (int n = 0; n < 3; ++n)
             {
-                const int s = settings.order[n];
-                const auto& slot = settings.slots[s];
+                const int s = cur.order[n];
+                const auto& slot = cur.slots[s];
                 const float cutoffOct = baseOct[s] + fenv * slot.envAmount * envOctavesAtFull + lfoOct;
                 lastCutoffHz[s] = std::exp2 (juce::jlimit (4.3f, 14.3f, cutoffOct));
                 filtered = filters[s].process (filtered, slot, lastCutoffHz[s]);
-                if (settings.taps[n + 1] != nullptr) settings.taps[n + 1][pos] += filtered * gain;
+                if (cur.taps[n + 1] != nullptr) cur.taps[n + 1][pos] += filtered * gain;
             }
             lastFreq = (float) (freq * tune1);
 
             const float sample = filtered * gain;
 
             for (int ch = 0; ch < numChannels; ++ch)
-                output.addSample (ch, startSample + i, sample);
+                output.addSample (ch, pos, sample);
 
             if (! ampEnv.isActive())
             {
@@ -271,8 +335,8 @@ private:
     // The newest note tells the screen what to draw.
     void publishLiveInfo()
     {
-        auto* live = settings.live;
-        if (live == nullptr || noteSerial != settings.newestNote)
+        auto* live = shared.live;
+        if (live == nullptr || noteSerial != shared.newestNote)
             return;
 
         live->noteActive.store (isVoiceActive());
@@ -280,7 +344,7 @@ private:
         for (int s = 0; s < 3; ++s)
         {
             live->liveCutoffHz[s].store (lastCutoffHz[s]);
-            live->gateLevel[s].store (settings.slots[s].type == FilterType::lowpassGate ? filters[s].gate() : 1.0f);
+            live->gateLevel[s].store (shared.slots[s].type == FilterType::lowpassGate ? filters[s].gate() : 1.0f);
         }
         live->filterEnvStage.store (filterEnv.stageIndex());
         live->filterEnvSeconds.store ((float) filterEnv.secondsInStage());
@@ -292,13 +356,59 @@ private:
 
     void applyEnvelopeSettings()
     {
-        ampEnv.setParameters    (settings.aenvA, settings.aenvD, settings.aenvS, settings.aenvR);
-        filterEnv.setParameters (settings.fenvA, settings.fenvD, settings.fenvS, settings.fenvR);
+        ampEnv.setParameters    (cur.aenvA, cur.aenvD, cur.aenvS, cur.aenvR);
+        filterEnv.setParameters (cur.fenvA, cur.fenvD, cur.fenvS, cur.fenvR);
     }
 
+    // This voice's source values right now.
+    void currentSources (int pos, float* src) const
+    {
+        src[Mod::lfo1]      = shared.lfo[0] != nullptr ? shared.lfo[0][pos] : 0.0f;
+        src[Mod::lfo2]      = shared.lfo[1] != nullptr ? shared.lfo[1][pos] : 0.0f;
+        src[Mod::filterEnv] = filterEnv.level();
+        src[Mod::ampEnv]    = ampEnv.level();
+        src[Mod::velocity]  = noteVelocity;
+        src[Mod::modWheel]  = shared.mod != nullptr ? shared.mod->modWheel : 0.0f;
+        src[Mod::key]       = juce::jlimit (-1.0f, 1.0f, (float) (targetNote - 60) / 60.0f);
+    }
+
+    void refreshSettings (int pos)
+    {
+        cur = shared;
+        auto* m = shared.mod;
+        if (m != nullptr)
+        {
+            float src[Mod::numSources];
+            currentSources (pos, src);
+
+            if (noteSerial == shared.newestNote)
+                for (int s = 0; s < Mod::numSources; ++s)
+                    m->newestSources[(size_t) s] = src[s];
+
+            if (m->anyVoiceRoutes)
+            {
+                float offset[Mod::numTargets] {};
+                bool touched[Mod::numTargets] {};
+                for (int r = 0; r < m->numRoutes; ++r)
+                {
+                    const auto& route = m->routes[(size_t) r];
+                    if (Mod::isGlobal (route.target))
+                        continue;
+                    offset[route.target] += src[route.source] * route.amount;
+                    touched[route.target] = true;
+                }
+                for (int t = 0; t < Mod::numTargets; ++t)
+                    if (touched[t])
+                        applyTarget (cur, t, Mod::applyOffset (*m, t, offset[t]));
+            }
+        }
+        applyEnvelopeSettings();
+    }
+
+    // Returns -1..1; scaled by Bend Range when used.
     static double wheelToSemitones (int wheel)
     {
-        return (wheel - 8192) / 8192.0 * pitchBendRangeSemitones;
+        return (wheel - 8192) / 8192.0;
     }
 
     float sub (double inc) const
@@ -314,11 +424,13 @@ private:
     void glideFrom (double fromNote)
     {
         currentNote = fromNote;
-        glideStep = (targetNote - currentNote) / (settings.glideSeconds * getSampleRate());
+        glideStep = (targetNote - currentNote) / (shared.glideSeconds * getSampleRate());
         gliding = std::abs (targetNote - currentNote) > 1.0e-9;
     }
 
-    VoiceSettings& settings;
+    VoiceSettings& shared;  // written by the processor once per block
+    VoiceSettings cur;      // this voice's copy, with its modulation applied
+    float noteVelocity = 1.0f;
     juce::Random random;
 
     Envelope ampEnv, filterEnv;

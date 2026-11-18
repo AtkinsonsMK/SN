@@ -33,6 +33,22 @@ namespace ParamIDs
     inline constexpr const char* ringMod = "ring";
     inline constexpr const char* voices  = "voices";
 
+    // LFOs (LFO 1 Rate keeps its original ID "lfo_rate")
+    inline constexpr const char* lfo1Shape  = "lfo1_shape";
+    inline constexpr const char* lfo1Smooth = "lfo1_smooth";
+    inline constexpr const char* lfo2Rate   = "lfo2_rate";
+    inline constexpr const char* lfo2Shape  = "lfo2_shape";
+    inline constexpr const char* lfo2Smooth = "lfo2_smooth";
+
+    // Playing and processing switches (things that used to be fixed)
+    inline constexpr const char* velocityAmount = "vel_amount";
+    inline constexpr const char* keyTracking    = "key_track";
+    inline constexpr const char* bendRange      = "bend_range";
+    inline constexpr const char* oversampling   = "oversampling";
+    inline constexpr const char* voiceGainComp  = "voice_comp";
+    inline constexpr const char* limiter        = "limiter";
+    inline constexpr const char* slotLevelMatch = "match"; // per slot: "f1_match" ...
+
     // Filter envelope
     inline constexpr const char* fenvAttack  = "fenv_attack";
     inline constexpr const char* fenvDecay   = "fenv_decay";
@@ -93,6 +109,12 @@ namespace Params
         if (seconds < 0.01f)  return String (seconds * 1000.0f, 1) + " ms";
         if (seconds < 1.0f)   return String (roundToInt (seconds * 1000.0f)) + " ms";
         return String (seconds, 2) + " s";
+    }
+
+    inline const StringArray& lfoShapeNames()
+    {
+        static const StringArray names { "Sine", "Triangle", "Saw Up", "Saw Down", "Square", "Random" };
+        return names;
     }
 
     inline const StringArray& filterTypeNames()
@@ -215,6 +237,38 @@ namespace Params
             layout.add (percent (ParamIDs::slot (i, ParamIDs::slotEnv),       n + "Env Amount", -100.0f, 100.0f, i == 0 ? 40.0f : 0.0f));
             layout.add (percent (ParamIDs::slot (i, ParamIDs::slotCharacter), n + "Type Knob", 0.0f, 100.0f, 0.0f));
         }
+
+        // Added in v1.2: LFO 2, LFO shapes, and switches for processing
+        // that used to be fixed. Defaults match the old fixed behaviour,
+        // except the Output Limiter, which is new and on for safety.
+        auto lfoRate = [] (const String& id, const String& name, float def)
+        {
+            NormalisableRange<float> range (0.05f, 20.0f);
+            range.setSkewForCentre (2.0f);
+            return std::make_unique<AudioParameterFloat> (
+                ParameterID { id, 1 }, name, range, def,
+                AudioParameterFloatAttributes().withLabel ("Hz").withStringFromValueFunction (
+                    [] (float v, int) { return String (v, v < 1.0f ? 2 : 1) + " Hz"; }));
+        };
+        layout.add (std::make_unique<AudioParameterChoice> (ParameterID { ParamIDs::lfo1Shape, 1 }, "LFO 1 Shape", lfoShapeNames(), 1));
+        layout.add (percent (ParamIDs::lfo1Smooth, "LFO 1 Smooth", 0.0f, 100.0f, 0.0f));
+        layout.add (lfoRate (ParamIDs::lfo2Rate, "LFO 2 Rate", 0.5f));
+        layout.add (std::make_unique<AudioParameterChoice> (ParameterID { ParamIDs::lfo2Shape, 1 }, "LFO 2 Shape", lfoShapeNames(), 0));
+        layout.add (percent (ParamIDs::lfo2Smooth, "LFO 2 Smooth", 0.0f, 100.0f, 0.0f));
+
+        layout.add (percent (ParamIDs::velocityAmount, "Velocity to Volume", 0.0f, 100.0f, 50.0f));
+        layout.add (percent (ParamIDs::keyTracking,    "Key Tracking",       0.0f, 100.0f, 50.0f));
+        layout.add (std::make_unique<AudioParameterInt> (
+            ParameterID { ParamIDs::bendRange, 1 }, "Bend Range", 0, 24, 2,
+            AudioParameterIntAttributes().withStringFromValueFunction ([] (int v, int) { return String (v) + " st"; })));
+        layout.add (std::make_unique<AudioParameterChoice> (
+            ParameterID { ParamIDs::oversampling, 1 }, "Filter Oversampling", StringArray { "1x", "2x", "4x" }, 1));
+        layout.add (std::make_unique<AudioParameterBool> (ParameterID { ParamIDs::voiceGainComp, 1 }, "Voice Gain Compensation", true));
+        layout.add (std::make_unique<AudioParameterBool> (ParameterID { ParamIDs::limiter, 1 }, "Output Limiter", true));
+        for (int i = 0; i < ParamIDs::numSlots; ++i)
+            layout.add (std::make_unique<AudioParameterBool> (
+                ParameterID { ParamIDs::slot (i, ParamIDs::slotLevelMatch), 1 },
+                "Filter " + String (i + 1) + " Level Match", true));
 
         // EQ (3)
         for (auto [id, name] : { std::pair { ParamIDs::eqLow, "EQ Low" },

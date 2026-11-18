@@ -16,7 +16,8 @@ struct LiveInfo
     std::atomic<int>   filterEnvStage { 0 }, ampEnvStage { 0 };
     std::atomic<float> filterEnvSeconds { 0.0f }, ampEnvSeconds { 0.0f };
     std::atomic<float> filterEnvLevel { 0.0f }, ampEnvLevel { 0.0f };
-    std::atomic<float> lfoPhase { 0.0f };
+    std::atomic<float> lfoPhase { 0.0f }, lfo2Phase { 0.0f };
+    std::atomic<bool>  limiting { false }; // the Output Limiter turned something down (the screen clears it)
 
     // Output meter. outPeak is the loudest sample since the screen last
     // took it (the screen resets it to 0); outRms is a ~300 ms average.

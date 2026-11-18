@@ -314,7 +314,7 @@ int main (int argc, char** argv)
     {
         auto p = makeSynth (sr);
         const int total = (int) p->getParameters().size();
-        check (total == 53, "Synth has 53 controls (found " + juce::String (total) + ")");
+        check (total == 67, "Synth has 67 controls (found " + juce::String (total) + ")");
 
         bool ok = std::abs (paramValue (*p, sid (0, ParamIDs::slotType)) - FilterType::ota) < 0.01f
                && std::abs (paramValue (*p, sid (1, ParamIDs::slotType)) - FilterType::off) < 0.01f
@@ -360,7 +360,7 @@ int main (int argc, char** argv)
         for (int i = 0; i < out.getNumSamples(); ++i)
             if (! std::isfinite (out.getSample (0, i))) { finite = false; break; }
         const float peak = out.getMagnitude (0, 0, out.getNumSamples());
-        check (finite && peak < 1.5f && peak > 0.001f, name + ": stable at full Resonance and Drive (peak " + juce::String (peak, 3) + ")");
+        check (finite && peak <= 1.0f && peak > 0.001f, name + ": stable at full Resonance and Drive (peak " + juce::String (peak, 3) + ")");
     }
 
     {
@@ -577,7 +577,6 @@ int main (int argc, char** argv)
         setParam (*fm, ParamIDs::fm1to2, 80);
         auto b = render (*fm, 57, 60, false);
         const float ba = brightness (a, 9600, 12000), bb = brightness (b, 9600, 12000);
-        const double f = measureFreq (b, 9600, 24000, sr);
         check (bb > ba * 1.5f && b.getMagnitude (0, 0, b.getNumSamples()) < 1.0f,
                "FM 1 > 2 makes Osc 2 brighter without clipping (x" + juce::String (bb / ba, 1) + ")");
     }
@@ -648,6 +647,8 @@ int main (int argc, char** argv)
         const float peak = p->live.outPeak.load(), rms = p->live.outRms.load();
         check (peak > 0.05f && rms > 0.01f && peak >= rms && ! p->live.outClipped.load(),
                "Output meter reads the level (peak " + juce::String (juce::Decibels::gainToDecibels (peak), 1) + " dB)");
+        setParam (*p, ParamIDs::voiceGainComp, 0);
+        setParam (*p, ParamIDs::limiter, 0);
         setParam (*p, ParamIDs::volume, 6);
         setParam (*p, ParamIDs::osc2Level, 100);
         setParam (*p, ParamIDs::subLevel, 100);
@@ -657,6 +658,187 @@ int main (int argc, char** argv)
         p->processBlock (block, m);
         heldBlocks (*p, 20);
         check (p->live.outClipped.load(), "Clip light comes on when the output goes over 0 dB");
+    }
+
+
+    //==========================================================================
+    // Output safety
+    auto peakOf = [] (const juce::AudioBuffer<float>& b)
+    {
+        float peak = 0.0f; bool finite = true;
+        for (int ch = 0; ch < b.getNumChannels(); ++ch)
+            for (int i = 0; i < b.getNumSamples(); ++i)
+            {
+                const float x = b.getSample (ch, i);
+                if (! std::isfinite (x)) finite = false;
+                peak = juce::jmax (peak, std::abs (x));
+            }
+        return finite ? peak : 99.0f;
+    };
+    auto chordRender = [&] (SNSynthProcessor& p, std::initializer_list<int> notes, int blocks)
+    {
+        juce::MidiBuffer m;
+        for (int n : notes) m.addEvent (juce::MidiMessage::noteOn (1, n, (juce::uint8) 127), 0);
+        juce::AudioBuffer<float> block (2, 512);
+        p.processBlock (block, m);
+        return heldBlocks (p, blocks);
+    };
+    {
+        auto p = makeSynth (sr);
+        auto out = chordRender (*p, { 48, 52, 55, 59, 60, 64, 67, 71 }, 60);
+        const float peak = peakOf (out);
+        check (peak < 0.6f, "Default 8-note chord leaves headroom (peak " + juce::String (juce::Decibels::gainToDecibels (peak), 1) + " dB)");
+    }
+    for (bool limiterOn : { true, false })
+    {
+        // Worst case: 3 resonant Formant slots, all EQ +12, Volume +6, 16 notes.
+        auto p = makeSynth (sr);
+        setParam (*p, ParamIDs::limiter, limiterOn ? 1.0f : 0.0f);
+        setParam (*p, ParamIDs::voiceGainComp, 0);
+        setParam (*p, ParamIDs::voices, 16);
+        for (int sl = 0; sl < 3; ++sl)
+        {
+            setParam (*p, ParamIDs::slot (sl, ParamIDs::slotType), FilterType::formant);
+            setParam (*p, ParamIDs::slot (sl, ParamIDs::slotResonance), 100);
+            setParam (*p, ParamIDs::slot (sl, ParamIDs::slotDrive), 100);
+            setParam (*p, ParamIDs::slot (sl, ParamIDs::slotCutoff), 1000);
+        }
+        for (auto* id : { ParamIDs::eqLow, ParamIDs::eqMid, ParamIDs::eqHigh }) setParam (*p, id, 12);
+        setParam (*p, ParamIDs::volume, 6);
+        setParam (*p, ParamIDs::osc2Level, 100);
+        setParam (*p, ParamIDs::subLevel, 100);
+        auto out = chordRender (*p, { 36, 40, 43, 47, 48, 52, 55, 59, 60, 64, 67, 71, 72, 76, 79, 83 }, 60);
+        const float peak = peakOf (out);
+        check (peak <= 0.967f, juce::String ("Worst-case chord never goes over -0.3 dB, Limiter ") + (limiterOn ? "on" : "off")
+                                   + " (peak " + juce::String (juce::Decibels::gainToDecibels (peak), 2) + " dB)");
+        if (limiterOn)
+            check (p->live.limiting.load(), "Limiter reports that it is working");
+    }
+
+    //==========================================================================
+    // Modulation
+    {
+        // An oscillator at Level 0 still works as an FM source (M's question).
+        auto plain = oneOsc (0);
+        setParam (*plain, ParamIDs::slot (0, ParamIDs::slotType), FilterType::off);
+        setParam (*plain, ParamIDs::sawLevel, 0);
+        setParam (*plain, ParamIDs::sineLevel, 100);
+        auto a = render (*plain, 57, 60, false);
+        auto fm = oneOsc (0);
+        setParam (*fm, ParamIDs::slot (0, ParamIDs::slotType), FilterType::off);
+        setParam (*fm, ParamIDs::sawLevel, 0);
+        setParam (*fm, ParamIDs::sineLevel, 100);
+        setParam (*fm, ParamIDs::fm2to1, 80); // Osc 2 Level stays at 0
+        auto b = render (*fm, 57, 60, false);
+        const float ba = brightness (a, 9600, 12000), bb = brightness (b, 9600, 12000);
+        check (paramValue (*fm, ParamIDs::osc2Level) < 0.01f && bb > ba * 1.5f,
+               "FM 2 > 1 works with Osc 2 Level at 0 (x" + juce::String (bb / ba, 1) + " brighter)");
+    }
+    {
+        // LFO 1 routed to Filter 1 Cutoff moves the brightness.
+        auto still = makeSynth (sr);
+        setParam (*still, ParamIDs::drift, 0);
+        setParam (*still, ParamIDs::slot (0, ParamIDs::slotCutoff), 500);
+        setParam (*still, ParamIDs::slot (0, ParamIDs::slotEnv), 0);
+        auto a = render (*still, 45, 120, false);
+        auto moving = makeSynth (sr);
+        setParam (*moving, ParamIDs::drift, 0);
+        setParam (*moving, ParamIDs::slot (0, ParamIDs::slotCutoff), 500);
+        setParam (*moving, ParamIDs::slot (0, ParamIDs::slotEnv), 0);
+        setParam (*moving, ParamIDs::lfoRate, 2);
+        moving->modMatrix.set (Mod::lfo1, Mod::filterTarget (0, 0), 0.3f);
+        auto b = render (*moving, 45, 120, false);
+        auto spread = [&] (const juce::AudioBuffer<float>& buf)
+        {
+            float lo = 1e9f, hi = 0.0f;
+            for (int k = 0; k < 20; ++k) { const float v = brightness (buf, 9600 + k * 2400, 2400); lo = juce::jmin (lo, v); hi = juce::jmax (hi, v); }
+            return hi / juce::jmax (lo, 1e-9f);
+        };
+        check (spread (b) > spread (a) * 2.0f, "LFO 1 > Filter 1 Cutoff routing moves the brightness (x" + juce::String (spread (b), 1) + " vs x" + juce::String (spread (a), 1) + ")");
+    }
+    {
+        // Velocity routed to Osc 1 Level: soft notes quieter than hard ones beyond the fixed amount.
+        auto level = [&] (int vel, bool routed)
+        {
+            auto p = makeSynth (sr);
+            setParam (*p, ParamIDs::velocityAmount, 0);
+            setParam (*p, ParamIDs::osc1Level, 0);
+            if (routed) p->modMatrix.set (Mod::velocity, Mod::osc1Level, 1.0f);
+            juce::MidiBuffer m; m.addEvent (juce::MidiMessage::noteOn (1, 57, (juce::uint8) vel), 0);
+            juce::AudioBuffer<float> block (2, 512);
+            p->processBlock (block, m);
+            auto out = heldBlocks (*p, 30);
+            return out.getRMSLevel (0, 4800, 9600);
+        };
+        const float soft = level (30, true), hard = level (127, true), none = level (127, false);
+        check (hard > soft * 2.0f && none < 1.0e-4f, "Velocity > Osc 1 Level: harder notes are louder (" + juce::String (soft, 3) + " vs " + juce::String (hard, 3) + ")");
+    }
+    {
+        // Mod wheel routed to Osc 1 Fine bends the pitch up.
+        auto p = oneOsc (0);
+        setParam (*p, ParamIDs::slot (0, ParamIDs::slotType), FilterType::off);
+        p->modMatrix.set (Mod::modWheel, Mod::osc1Fine, 0.5f); // half of the -100..+100 range = +100 cents at full wheel
+        send (*p, { juce::MidiMessage::controllerEvent (1, 1, 127), juce::MidiMessage::noteOn (1, 57, (juce::uint8) 100) });
+        auto out = heldBlocks (*p, 60);
+        const double f = measureFreq (out, 4800, 24000, sr);
+        const double expected = 220.0 * std::pow (2.0, 1.0 / 12.0);
+        check (std::abs (f - expected) < 3.0, "Mod Wheel > Osc 1 Fine raises the pitch (" + juce::String (f, 1) + " Hz)");
+    }
+    {
+        // LFO 2 > Volume makes the level move (a global target).
+        auto p = makeSynth (sr);
+        setParam (*p, ParamIDs::lfo2Rate, 4);
+        setParam (*p, ParamIDs::lfo2Shape, 4); // Square
+        p->modMatrix.set (Mod::lfo2, Mod::volume, -0.5f);
+        auto out = render (*p, 57, 100, false);
+        float lo = 1e9f, hi = 0.0f;
+        for (int k = 0; k < 30; ++k) { const float v = out.getRMSLevel (0, 9600 + k * 1200, 1200); lo = juce::jmin (lo, v); hi = juce::jmax (hi, v); }
+        check (hi > lo * 3.0f, "LFO 2 (Square) > Volume makes the level pulse (x" + juce::String (hi / lo, 1) + ")");
+    }
+    {
+        // LFO shapes
+        bool ok = std::abs (SNSynthProcessor::lfoShapeValue (0, 0.25, 0) - 1.0f) < 1e-4f
+               && std::abs (SNSynthProcessor::lfoShapeValue (1, 0.5, 0) - 1.0f) < 1e-4f
+               && std::abs (SNSynthProcessor::lfoShapeValue (2, 0.0, 0) + 1.0f) < 1e-4f
+               && std::abs (SNSynthProcessor::lfoShapeValue (3, 0.0, 0) - 1.0f) < 1e-4f
+               && SNSynthProcessor::lfoShapeValue (4, 0.7, 0) < 0.0f
+               && std::abs (SNSynthProcessor::lfoShapeValue (5, 0.3, 0.42f) - 0.42f) < 1e-6f;
+        check (ok, "LFO shapes: Sine, Triangle, Saw Up, Saw Down, Square, Random");
+    }
+    {
+        // Routings are saved and reloaded; old "LFO to Cutoff" becomes routings.
+        auto p = makeSynth (sr);
+        p->modMatrix.set (Mod::ampEnv, Mod::filterTarget (2, 1), -0.25f);
+        p->modMatrix.set (Mod::key, Mod::eqHigh, 0.4f);
+        juce::MemoryBlock state;
+        p->getStateInformation (state);
+        SNSynthProcessor q;
+        q.setStateInformation (state.getData(), (int) state.getSize());
+        check (std::abs (q.modMatrix.get (Mod::ampEnv, Mod::filterTarget (2, 1)) + 0.25f) < 1e-4f
+                   && std::abs (q.modMatrix.get (Mod::key, Mod::eqHigh) - 0.4f) < 1e-4f
+                   && std::abs (q.modMatrix.get (Mod::lfo1, Mod::osc1Saw)) < 1e-6f,
+               "Modulation routings are saved and reloaded");
+
+        auto old = makeSynth (sr);
+        setParam (*old, ParamIDs::lfoCutoff, 50);
+        juce::MemoryBlock s2;
+        old->getStateInformation (s2);
+        SNSynthProcessor r;
+        r.setStateInformation (s2.getData(), (int) s2.getSize());
+        const float a = r.modMatrix.get (Mod::lfo1, Mod::filterTarget (1, 0));
+        check (std::abs (a - 0.15f) < 1e-3f && paramValue (r, ParamIDs::lfoCutoff) < 0.01f,
+               "Older projects' LFO to Cutoff becomes LFO 1 routings (" + juce::String (a, 3) + ")");
+    }
+    {
+        // Oversampling and Level Match switches change the sound, not the pitch.
+        auto p = makeSynth (sr);
+        setParam (*p, ParamIDs::oversampling, 0);
+        auto a = render (*p, 69, 60, false);
+        auto q = makeSynth (sr);
+        setParam (*q, ParamIDs::oversampling, 2);
+        auto b = render (*q, 69, 60, false);
+        check (std::abs (measureFreq (a, 9600, 12000, sr) - 440.0) < 4.0 && std::abs (measureFreq (b, 9600, 12000, sr) - 440.0) < 4.0,
+               "Oversampling 1x and 4x both play in tune");
     }
 
     std::cout << (failures == 0 ? "All checks passed" : juce::String (failures) + " check(s) failed") << std::endl;

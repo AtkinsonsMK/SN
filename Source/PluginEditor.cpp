@@ -275,8 +275,11 @@ void SNSynthEditor::timerCallback()
 {
     // Catch key releases that happened while a menu or another window had focus.
     updateHeldKeys();
+    // Take the keys back only if our own window is already the active one,
+    // so the synth never pulls focus away from other apps' windows.
     if (isShowing() && juce::Component::getCurrentlyFocusedComponent() == nullptr)
-        grabKeyboardFocus();
+        if (auto* peer = getPeer(); peer != nullptr && peer->isFocused() && juce::Process::isForegroundProcess())
+            grabKeyboardFocus();
 
     for (auto* d : displays)
         d->repaint();

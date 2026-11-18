@@ -41,6 +41,10 @@ public:
     LiveInfo live; // read by the on-screen displays
     int getActiveVoiceCount() const { return live.activeVoices.load(); }
 
+    // Modulation routings (source x knob amounts). The screen edits these.
+    Mod::Matrix modMatrix;
+    static float lfoShapeValue (int shape, double phase, float randomValue);
+
     // Filter slot order (which slot runs first, second, third). Saved with the project.
     std::array<int, 3> getSlotOrder() const;
     void setSlotOrder (std::array<int, 3> order);
@@ -49,7 +53,8 @@ public:
 private:
     void updateVoiceSettings();
     void renderLfo (int numSamples);
-    void updateEq();
+    void updateEq (const float* gainsDb);
+    void globalModValues (int pos, float* eqDb, float& volDb);
     void applySlotOrderFromState();
 
     struct SlotParams { std::atomic<float> *type, *cutoff, *res, *drive, *env, *character; };
@@ -63,9 +68,17 @@ private:
     VoiceSettings voiceSettings;
     SynthEngine synth { voiceSettings };
     float meterMeanSquare = 0.0f;
-    std::vector<float> lfoBuffer;
+    Mod::Context modContext;
+    std::array<std::atomic<float>*, Mod::numTargets> targetParams {};
+    static constexpr int globalModInterval = 32;
+    std::array<std::vector<float>, 2> lfoBuffers;
+    std::array<double, 2> lfoPhases { 0.0, 0.0 };
+    std::array<float, 2> lfoSmoothed { 0.0f, 0.0f }, lfoRandom { 0.0f, 0.0f };
+    juce::Random lfoRng { 12345 };
+    juce::SmoothedValue<float> voiceComp { 1.0f };
+    float limiterEnv = 0.0f, limiterRelease = 0.9999f;
+    static constexpr float limiterCeiling = 0.966f; // -0.3 dB
     std::array<std::vector<float>, 5> tapBuffers; // osc, 3 filter positions, after EQ
-    double lfoPhase = 0.0;
     double currentSampleRate = 44100.0;
 
     std::atomic<float>* volumeParam = nullptr;

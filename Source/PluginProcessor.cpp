@@ -16,6 +16,14 @@ SNSynthProcessor::SNSynthProcessor()
     }
     parameters.state.setProperty (StateIDs::slotOrder, "0,1,2", nullptr);
 
+    for (int t = 0; t < Mod::numTargets; ++t)
+    {
+        auto* param = dynamic_cast<juce::RangedAudioParameter*> (parameters.getParameter (Mod::targetIds()[(size_t) t]));
+        jassert (param != nullptr);
+        modContext.ranges[(size_t) t] = param->getNormalisableRange();
+        targetParams[(size_t) t] = parameters.getRawParameterValue (Mod::targetIds()[(size_t) t]);
+    }
+    voiceSettings.mod = &modContext;
 }
 
 float SNSynthProcessor::volumeDbToGain (float db)
@@ -28,7 +36,12 @@ float SNSynthProcessor::volumeDbToGain (float db)
 void SNSynthProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
     currentSampleRate = sampleRate;
-    lfoBuffer.assign ((size_t) juce::jmax (samplesPerBlock, 512), 0.0f);
+    for (auto& b : lfoBuffers)
+        b.assign ((size_t) juce::jmax (samplesPerBlock, 512), 0.0f);
+    limiterRelease = std::exp (-1.0f / (0.15f * (float) sampleRate));
+    limiterEnv = 0.0f;
+    voiceComp.reset (sampleRate, 0.05);
+    voiceComp.setCurrentAndTargetValue (1.0f);
     for (auto& t : tapBuffers)
         t.assign ((size_t) juce::jmax (samplesPerBlock, 512), 0.0f);
     voiceSettings.live = &live;
@@ -41,7 +54,9 @@ void SNSynthProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     for (auto* bank : { &eqLow, &eqMid, &eqHigh })
         for (auto& f : *bank) { f.prepare (spec); f.reset(); }
     lastEq[0] = lastEq[1] = lastEq[2] = 1000.0f; // force coefficient update
-    updateEq();
+    updateVoiceSettings();
+    const float flat[3] = { modContext.baseReal[Mod::eqLow], modContext.baseReal[Mod::eqMid], modContext.baseReal[Mod::eqHigh] };
+    updateEq (flat);
 
     outputGain.reset (sampleRate, 0.02);
     outputGain.setCurrentAndTargetValue (volumeDbToGain (volumeParam->load()));
@@ -74,28 +89,88 @@ void SNSynthProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
             voiceSettings.taps[t] = tapBuffers[t].data();
     }
 
+    // Mod wheel (MIDI CC 1)
+    for (const auto meta : midi)
+    {
+        const auto msg = meta.getMessage();
+        if (msg.isController() && msg.getControllerNumber() == 1)
+            modContext.modWheel = (float) msg.getControllerValue() / 127.0f;
+    }
+
     synth.renderNextBlock (buffer, midi, 0, n);
 
-    // 3-band EQ
-    updateEq();
-    for (int ch = 0; ch < juce::jmin (2, buffer.getNumChannels()); ++ch)
-    {
-        auto* d = buffer.getWritePointer (ch);
-        for (int i = 0; i < buffer.getNumSamples(); ++i)
-            d[i] = eqHigh[(size_t) ch].processSample (eqMid[(size_t) ch].processSample (eqLow[(size_t) ch].processSample (d[i])));
-    }
-    if (buffer.getNumChannels() > 0)
-        std::copy (buffer.getReadPointer (0), buffer.getReadPointer (0) + n, tapBuffers[4].begin());
-
-    outputGain.setTargetValue (volumeDbToGain (volumeParam->load()));
     const int numSamples  = buffer.getNumSamples();
     const int numChannels = buffer.getNumChannels();
 
-    for (int i = 0; i < numSamples; ++i)
+    // Voice Gain Compensation: turns the sum down as more notes play
+    // (1 / square root of the number of notes), so chords don't jump in level.
     {
-        const float g = outputGain.getNextValue();
-        for (int ch = 0; ch < numChannels; ++ch)
-            buffer.getWritePointer (ch)[i] *= g;
+        const bool comp = p (ParamIDs::voiceGainComp)->load() > 0.5f;
+        const int playing = synth.countActiveVoices();
+        voiceComp.setTargetValue (comp ? 1.0f / std::sqrt ((float) juce::jmax (1, playing)) : 1.0f);
+    }
+
+    // EQ, Volume and the limiter run in short chunks so EQ and Volume can
+    // follow their modulation.
+    const bool limiterOn = p (ParamIDs::limiter)->load() > 0.5f;
+    for (int start = 0; start < numSamples; start += globalModInterval)
+    {
+        const int len = juce::jmin (globalModInterval, numSamples - start);
+
+        float eqDb[3], volDb;
+        globalModValues (start, eqDb, volDb);
+
+        updateEq (eqDb);
+        for (int ch = 0; ch < juce::jmin (2, numChannels); ++ch)
+        {
+            auto* d = buffer.getWritePointer (ch, start);
+            for (int i = 0; i < len; ++i)
+                d[i] = eqHigh[(size_t) ch].processSample (eqMid[(size_t) ch].processSample (eqLow[(size_t) ch].processSample (d[i])));
+        }
+        if (numChannels > 0)
+            std::copy (buffer.getReadPointer (0, start), buffer.getReadPointer (0, start) + len, tapBuffers[4].begin() + start);
+
+        outputGain.setTargetValue (volumeDbToGain (volDb));
+        for (int i = start; i < start + len; ++i)
+        {
+            const float g = outputGain.getNextValue() * voiceComp.getNextValue();
+            float peak = 0.0f;
+            for (int ch = 0; ch < numChannels; ++ch)
+            {
+                auto& x = buffer.getWritePointer (ch)[i];
+                x *= g;
+                if (! std::isfinite (x))
+                    x = 0.0f; // safety: a broken value never reaches the speakers
+                peak = juce::jmax (peak, std::abs (x));
+            }
+            if (peak > 1.0f)
+                live.outClipped.store (true); // would have gone over 0 dB
+
+            // Output Limiter: holds the output just under 0 dB. It reacts
+            // instantly to peaks and lets go over about 150 ms.
+            if (limiterOn)
+            {
+                limiterEnv = juce::jmax (peak, limiterEnv * limiterRelease);
+                if (limiterEnv > limiterCeiling)
+                {
+                    const float lg = limiterCeiling / limiterEnv;
+                    for (int ch = 0; ch < numChannels; ++ch)
+                        buffer.getWritePointer (ch)[i] *= lg;
+                    live.limiting.store (true);
+                }
+            }
+            else
+                limiterEnv = 0.0f;
+
+            // Safety ceiling, always on even with the Limiter off: nothing
+            // leaves the synth above -0.3 dB. With the Limiter off, loud
+            // peaks are clipped flat here (that's what the CLIP light warns about).
+            for (int ch = 0; ch < numChannels; ++ch)
+            {
+                auto& x = buffer.getWritePointer (ch)[i];
+                x = juce::jlimit (-limiterCeiling, limiterCeiling, x);
+            }
+        }
     }
 
     // Output meter: peak (held by the screen) and a ~300 ms average.
@@ -119,8 +194,6 @@ void SNSynthProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
         live.outRms.store (std::sqrt (meterMeanSquare));
         float prev = live.outPeak.load();
         while (peak > prev && ! live.outPeak.compare_exchange_weak (prev, peak)) {}
-        if (peak > 1.0f)
-            live.outClipped.store (true);
         live.activeVoices.store (synth.countActiveVoices());
     }
 
@@ -136,84 +209,109 @@ void SNSynthProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
         ++w;
     }
     live.writePos.store (w & 0x3fffffff, std::memory_order_release);
-    live.lfoPhase.store ((float) lfoPhase);
+    live.lfoPhase.store ((float) lfoPhases[0]);
+    live.lfo2Phase.store ((float) lfoPhases[1]);
 }
 
 void SNSynthProcessor::updateVoiceSettings()
 {
     auto& v = voiceSettings;
-    auto& o1 = v.osc[0];
-    o1.sine       = p (ParamIDs::sineLevel)->load()  * 0.01f;
-    o1.saw        = p (ParamIDs::sawLevel)->load()   * 0.01f;
-    o1.pulse      = p (ParamIDs::pulseLevel)->load() * 0.01f;
-    o1.pulseWidth = p (ParamIDs::pulseWidth)->load() * 0.01f;
-    o1.level      = p (ParamIDs::osc1Level)->load()  * 0.01f;
-    o1.tuneSemitones = p (ParamIDs::osc1Coarse)->load() + p (ParamIDs::osc1Fine)->load() * 0.01f;
+    auto& m = modContext;
 
-    auto& o2 = v.osc[1];
-    o2.sine       = p (ParamIDs::osc2Sine)->load()  * 0.01f;
-    o2.saw        = p (ParamIDs::osc2Saw)->load()   * 0.01f;
-    o2.pulse      = p (ParamIDs::osc2Pulse)->load() * 0.01f;
-    o2.pulseWidth = p (ParamIDs::osc2Pw)->load()    * 0.01f;
-    o2.level      = p (ParamIDs::osc2Level)->load() * 0.01f;
-    o2.tuneSemitones = p (ParamIDs::osc2Coarse)->load() + p (ParamIDs::osc2Fine)->load() * 0.01f;
+    // Every modulatable knob: plain value into the settings, and its
+    // position for the modulation.
+    for (int t = 0; t < Mod::numTargets; ++t)
+    {
+        const float real = targetParams[(size_t) t]->load();
+        m.baseReal[(size_t) t] = real;
+        m.baseNorm[(size_t) t] = m.ranges[(size_t) t].convertTo0to1 (real);
+        applyTarget (v, t, real);
+    }
 
-    v.subLevel = p (ParamIDs::subLevel)->load() * 0.01f;
-    v.fm1to2   = p (ParamIDs::fm1to2)->load()   * 0.01f;
-    v.fm2to1   = p (ParamIDs::fm2to1)->load()   * 0.01f;
-    v.ringMod  = p (ParamIDs::ringMod)->load()  * 0.01f;
-    synth.setVoiceLimit ((int) p (ParamIDs::voices)->load());
+    // Active routings
+    m.numRoutes = 0;
+    m.anyVoiceRoutes = false;
+    for (int src = 0; src < Mod::numSources; ++src)
+        for (int t = 0; t < Mod::numTargets; ++t)
+        {
+            const float a = modMatrix.get (src, t);
+            if (std::abs (a) > 1.0e-5f)
+            {
+                m.routes[(size_t) m.numRoutes++] = { src, t, a };
+                if (! Mod::isGlobal (t))
+                    m.anyVoiceRoutes = true;
+            }
+        }
 
-    v.fenvA = p (ParamIDs::fenvAttack)->load();
-    v.fenvD = p (ParamIDs::fenvDecay)->load();
-    v.fenvS = p (ParamIDs::fenvSustain)->load() * 0.01f;
-    v.fenvR = p (ParamIDs::fenvRelease)->load();
-
-    v.aenvA = p (ParamIDs::aenvAttack)->load();
-    v.aenvD = p (ParamIDs::aenvDecay)->load();
-    v.aenvS = p (ParamIDs::aenvSustain)->load() * 0.01f;
-    v.aenvR = p (ParamIDs::aenvRelease)->load();
-
-    v.lfoToCutoff  = p (ParamIDs::lfoCutoff)->load() * 0.01f;
-    v.drift        = p (ParamIDs::drift)->load() * 0.01f;
-    v.glideSeconds = p (ParamIDs::glide)->load();
+    v.lfoToCutoff    = p (ParamIDs::lfoCutoff)->load() * 0.01f;
+    v.velocityAmount = p (ParamIDs::velocityAmount)->load() * 0.01f;
+    v.keyTracking    = p (ParamIDs::keyTracking)->load() * 0.01f;
+    v.bendRange      = p (ParamIDs::bendRange)->load();
+    const int os     = 1 << juce::jlimit (0, 2, (int) p (ParamIDs::oversampling)->load());
 
     for (size_t i = 0; i < 3; ++i)
     {
-        auto& sp = slotParams[i];
         auto& slot = v.slots[i];
-        slot.type      = (int) sp.type->load();
-        slot.cutoffHz  = sp.cutoff->load();
-        slot.resonance = sp.res->load() * 0.01f;
-        slot.drive     = sp.drive->load() * 0.01f;
-        slot.envAmount = sp.env->load() * 0.01f;
-        slot.character = sp.character->load() * 0.01f;
+        slot.type       = (int) slotParams[i].type->load();
+        slot.levelMatch = parameters.getRawParameterValue (ParamIDs::slot ((int) i, ParamIDs::slotLevelMatch))->load() > 0.5f;
+        slot.oversample = os;
         v.order[i] = slotOrder[i].load();
     }
+
+    synth.setVoiceLimit ((int) p (ParamIDs::voices)->load());
 }
 
-void SNSynthProcessor::updateEq()
+// EQ and Volume, with their modulation, at sample `pos` of this block.
+void SNSynthProcessor::globalModValues (int pos, float* eqDb, float& volDb)
 {
-    const float gains[3] = { p (ParamIDs::eqLow)->load(), p (ParamIDs::eqMid)->load(), p (ParamIDs::eqHigh)->load() };
-    using C = juce::dsp::IIR::Coefficients<float>;
+    auto& m = modContext;
+    float offset[4] {};
+    if (m.numRoutes > 0)
+    {
+        float src[Mod::numSources];
+        for (int s = 0; s < Mod::numSources; ++s)
+            src[s] = m.newestSources[(size_t) s];
+        src[Mod::lfo1] = lfoBuffers[0][(size_t) pos];
+        src[Mod::lfo2] = lfoBuffers[1][(size_t) pos];
+        src[Mod::modWheel] = m.modWheel;
+
+        for (int r = 0; r < m.numRoutes; ++r)
+        {
+            const auto& route = m.routes[(size_t) r];
+            if (Mod::isGlobal (route.target))
+                offset[route.target - Mod::eqLow] += src[route.source] * route.amount;
+        }
+    }
+    for (int b = 0; b < 3; ++b)
+        eqDb[b] = std::abs (offset[b]) > 1.0e-7f ? Mod::applyOffset (m, Mod::eqLow + b, offset[b]) : m.baseReal[(size_t) (Mod::eqLow + b)];
+    volDb = std::abs (offset[3]) > 1.0e-7f ? Mod::applyOffset (m, Mod::volume, offset[3]) : m.baseReal[(size_t) Mod::volume];
+}
+
+void SNSynthProcessor::updateEq (const float* gains)
+{
+    using C = juce::dsp::IIR::ArrayCoefficients<float>;
     const auto sr = currentSampleRate;
 
-    if (std::abs (gains[0] - lastEq[0]) > 1.0e-4f)
+    // Only recalculate a band when its gain has moved (no memory is
+    // allocated here, so this is safe to do while modulating).
+    if (std::abs (gains[0] - lastEq[0]) > 0.01f)
     {
-        auto c = C::makeLowShelf (sr, 100.0, 0.707f, juce::Decibels::decibelsToGain (gains[0]));
-        for (auto& f : eqLow) *f.coefficients = *c;
+        const auto c = C::makeLowShelf (sr, 100.0, 0.707f, juce::Decibels::decibelsToGain (gains[0]));
+        for (auto& f : eqLow) *f.coefficients = c;
+        lastEq[0] = gains[0];
     }
-    if (std::abs (gains[1] - lastEq[1]) > 1.0e-4f)
+    if (std::abs (gains[1] - lastEq[1]) > 0.01f)
     {
-        auto c = C::makePeakFilter (sr, 1000.0, 0.7f, juce::Decibels::decibelsToGain (gains[1]));
-        for (auto& f : eqMid) *f.coefficients = *c;
+        const auto c = C::makePeakFilter (sr, 1000.0, 0.7f, juce::Decibels::decibelsToGain (gains[1]));
+        for (auto& f : eqMid) *f.coefficients = c;
+        lastEq[1] = gains[1];
     }
-    if (std::abs (gains[2] - lastEq[2]) > 1.0e-4f)
+    if (std::abs (gains[2] - lastEq[2]) > 0.01f)
     {
-        auto c = C::makeHighShelf (sr, 8000.0, 0.707f, juce::Decibels::decibelsToGain (gains[2]));
-        for (auto& f : eqHigh) *f.coefficients = *c;
+        const auto c = C::makeHighShelf (sr, 8000.0, 0.707f, juce::Decibels::decibelsToGain (gains[2]));
+        for (auto& f : eqHigh) *f.coefficients = c;
+        lastEq[2] = gains[2];
     }
-    std::copy (gains, gains + 3, lastEq);
 }
 
 std::array<int, 3> SNSynthProcessor::getSlotOrder() const
@@ -259,21 +357,60 @@ void SNSynthProcessor::applySlotOrderFromState()
     setSlotOrder (order);
 }
 
+
+float SNSynthProcessor::lfoShapeValue (int shape, double phase, float randomValue)
+{
+    constexpr double twoPi = 6.283185307179586;
+    switch (shape)
+    {
+        case 0:  return (float) std::sin (twoPi * phase);                                    // Sine
+        case 1:  return (float) (phase < 0.5 ? 4.0 * phase - 1.0 : 3.0 - 4.0 * phase);       // Triangle
+        case 2:  return (float) (2.0 * phase - 1.0);                                         // Saw Up
+        case 3:  return (float) (1.0 - 2.0 * phase);                                         // Saw Down
+        case 4:  return phase < 0.5 ? 1.0f : -1.0f;                                          // Square
+        default: return randomValue;                                                         // Random (a new level each cycle)
+    }
+}
+
 void SNSynthProcessor::renderLfo (int numSamples)
 {
-    if ((int) lfoBuffer.size() < numSamples)
-        lfoBuffer.resize ((size_t) numSamples); // only if the host exceeds its announced block size
+    // Two free-running LFOs, so they keep their place between notes.
+    const char* rateIds[2]   = { ParamIDs::lfoRate, ParamIDs::lfo2Rate };
+    const char* shapeIds[2]  = { ParamIDs::lfo1Shape, ParamIDs::lfo2Shape };
+    const char* smoothIds[2] = { ParamIDs::lfo1Smooth, ParamIDs::lfo2Smooth };
 
-    // Triangle LFO, free-running so it keeps its place between notes.
-    const double inc = p (ParamIDs::lfoRate)->load() / currentSampleRate;
-    for (int i = 0; i < numSamples; ++i)
+    for (int l = 0; l < 2; ++l)
     {
-        lfoBuffer[(size_t) i] = (float) (lfoPhase < 0.5 ? 4.0 * lfoPhase - 1.0 : 3.0 - 4.0 * lfoPhase);
-        lfoPhase += inc;
-        if (lfoPhase >= 1.0)
-            lfoPhase -= 1.0;
+        auto& buf = lfoBuffers[(size_t) l];
+        if ((int) buf.size() < numSamples)
+            buf.resize ((size_t) numSamples); // only if the host exceeds its announced block size
+
+        const float rate = p (rateIds[l])->load();
+        const double inc = rate / currentSampleRate;
+        const int shape = (int) p (shapeIds[l])->load();
+
+        // Smooth rounds off corners: a gentle low-pass whose time is up to
+        // a quarter of one LFO cycle at 100%.
+        const float smooth = p (smoothIds[l])->load() * 0.01f;
+        const float smoothSeconds = smooth * 0.25f / rate;
+        const float coef = smoothSeconds > 1.0e-5f ? 1.0f - std::exp (-1.0f / (smoothSeconds * (float) currentSampleRate)) : 1.0f;
+
+        auto& phase = lfoPhases[(size_t) l];
+        for (int i = 0; i < numSamples; ++i)
+        {
+            const float raw = lfoShapeValue (shape, phase, lfoRandom[(size_t) l]);
+            lfoSmoothed[(size_t) l] += (raw - lfoSmoothed[(size_t) l]) * coef;
+            buf[(size_t) i] = lfoSmoothed[(size_t) l];
+            phase += inc;
+            if (phase >= 1.0)
+            {
+                phase -= 1.0;
+                lfoRandom[(size_t) l] = lfoRng.nextFloat() * 2.0f - 1.0f;
+            }
+        }
+        voiceSettings.lfo[l] = buf.data();
+        modContext.lfo[l] = buf.data();
     }
-    voiceSettings.lfo = lfoBuffer.data();
 }
 
 juce::AudioProcessorEditor* SNSynthProcessor::createEditor()
@@ -283,7 +420,10 @@ juce::AudioProcessorEditor* SNSynthProcessor::createEditor()
 
 void SNSynthProcessor::getStateInformation (juce::MemoryBlock& destData)
 {
-    if (auto xml = parameters.copyState().createXml())
+    auto state = parameters.copyState();
+    state.removeChild (state.getChildWithName ("MODULATION"), nullptr);
+    state.appendChild (modMatrix.toValueTree(), nullptr);
+    if (auto xml = state.createXml())
         copyXmlToBinary (*xml, destData);
 }
 
@@ -294,6 +434,19 @@ void SNSynthProcessor::setStateInformation (const void* data, int sizeInBytes)
         {
             parameters.replaceState (juce::ValueTree::fromXml (*xml));
             applySlotOrderFromState();
+            modMatrix.fromValueTree (parameters.state.getChildWithName ("MODULATION"));
+
+            // Projects from before modulation had one "LFO to Cutoff" knob for
+            // all filters. Turn it into LFO 1 routings on each filter's Cutoff
+            // (100% used to mean +/- 3 octaves; 100% routing = 10 octaves).
+            auto* old = parameters.getParameter (ParamIDs::lfoCutoff);
+            const float amount = p (ParamIDs::lfoCutoff)->load() * 0.01f;
+            if (amount > 0.0f)
+            {
+                for (int s = 0; s < ParamIDs::numSlots; ++s)
+                    modMatrix.set (Mod::lfo1, Mod::filterTarget (s, 0), amount * 3.0f / Mod::cutoffOctavesAtFull);
+                old->setValueNotifyingHost (0.0f);
+            }
         }
 }
 

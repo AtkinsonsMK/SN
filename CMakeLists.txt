@@ -16,8 +16,8 @@ include(FetchContent)
 FetchContent_Declare(
     JUCE
     GIT_REPOSITORY https://github.com/juce-framework/JUCE.git
-    GIT_TAG        8.0.4
-    GIT_SHALLOW    TRUE)
+    GIT_TAG        51d11a2be6d5c97ccf12b4e5e827006e19f0555a # 8.0.4
+    GIT_SHALLOW    FALSE)
 FetchContent_MakeAvailable(JUCE)
 
 juce_add_plugin(SNSynth

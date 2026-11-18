@@ -105,4 +105,4 @@ cmake --build build --config Release --target SNSynth_All SNSynthTests
 ./build/SNSynthTests
 ```
 
-Every push to `main` builds the Mac installer on GitHub Actions.
+Every push to `main` runs the offline checks on GitHub Actions (Linux). The Mac installer build on GitHub runs only when started by hand or for a version tag; day to day the app is built on the Mac itself.

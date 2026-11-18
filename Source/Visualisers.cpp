@@ -131,13 +131,13 @@ void Scope::paint (juce::Graphics& g)
     s[0].pulse = param (ParamIDs::pulseLevel) * 0.01f;
     s[0].pulseWidth = param (ParamIDs::pulseWidth) * 0.01f;
     s[0].level = param (ParamIDs::osc1Level)  * 0.01f;
-    s[0].tuneSemitones = param (ParamIDs::osc1Coarse) + param (ParamIDs::osc1Fine) * 0.01f;
+    s[0].coarse = param (ParamIDs::osc1Coarse); s[0].fine = param (ParamIDs::osc1Fine);
     s[1].sine  = param (ParamIDs::osc2Sine)   * 0.01f;
     s[1].saw   = param (ParamIDs::osc2Saw)    * 0.01f;
     s[1].pulse = param (ParamIDs::osc2Pulse)  * 0.01f;
     s[1].pulseWidth = param (ParamIDs::osc2Pw) * 0.01f;
     s[1].level = param (ParamIDs::osc2Level)  * 0.01f;
-    s[1].tuneSemitones = param (ParamIDs::osc2Coarse) + param (ParamIDs::osc2Fine) * 0.01f;
+    s[1].coarse = param (ParamIDs::osc2Coarse); s[1].fine = param (ParamIDs::osc2Fine);
     const float sub  = param (ParamIDs::subLevel) * 0.01f;
     const float fm12 = param (ParamIDs::fm1to2)  * 0.01f;
     const float fm21 = param (ParamIDs::fm2to1)  * 0.01f;
@@ -150,7 +150,7 @@ void Scope::paint (juce::Graphics& g)
     // shift on Osc 1 alone doesn't squash the drawing.
     const double base = 2.0 / (double) n;  // two cycles across the width
     const double inc1 = base;
-    const double inc2 = base * std::exp2 ((s[1].tuneSemitones - s[0].tuneSemitones) / 12.0);
+    const double inc2 = base * std::exp2 ((s[1].tuneSemitones() - s[0].tuneSemitones()) / 12.0);
     Oscillator o1, o2;
     o1.reset (s[0]);
     o2.reset (s[1]);

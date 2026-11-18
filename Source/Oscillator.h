@@ -8,7 +8,10 @@ struct OscSettings
     float sine = 0.0f, saw = 1.0f, pulse = 0.0f;  // wave levels, 0..1
     float pulseWidth = 0.5f;                      // 0.05..0.95
     float level = 1.0f;                           // 0..1, how much goes to the mix
-    float tuneSemitones = 0.0f;                   // Coarse + Fine
+    float coarse = 0.0f;                          // semitones (whole steps)
+    float fine = 0.0f;                            // cents (100 = one semitone)
+
+    float tuneSemitones() const { return std::round (coarse) + fine * 0.01f; }
 };
 
 // One band-limited oscillator mixing sine, saw and pulse. Its phase can be

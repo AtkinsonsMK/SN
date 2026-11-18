@@ -38,6 +38,8 @@ struct FilterSlotSettings
     float drive = 0.0f;        // 0..1
     float envAmount = 0.0f;    // -1..1
     float character = 0.0f;    // 0..1, the type-specific knob
+    bool  levelMatch = true;   // even out loudness between filter types
+    int   oversample = 2;      // 1, 2 or 4 times the host rate inside the filter
 };
 
 namespace FilterMath
@@ -156,8 +158,9 @@ class FilterSlot
 public:
     void prepare (float sampleRate)
     {
-        osRate = sampleRate * 2.0f;
-        combBuffer.assign ((size_t) (osRate * 0.06f) + 4, 0.0f); // down to about 17 Hz
+        hostRate = sampleRate;
+        osRate = sampleRate * (float) factor;
+        combBuffer.assign ((size_t) (sampleRate * 4.0f * 0.06f) + 4, 0.0f); // down to about 17 Hz at 4x
         gateAttackCoef = 1.0f - std::exp (-1.0f / (0.003f * sampleRate));
         reset();
     }
@@ -202,17 +205,26 @@ public:
             gateGain = gateLevel * std::sqrt (gateLevel);
         }
 
+        if (s.oversample != factor)
+            setOversampling (s.oversample);
+
         const float driveGain = 1.0f + s.drive * 15.0f;     // up to about +24 dB into the circuit
         const float makeup    = 1.0f / (1.0f + s.drive * 2.5f);
         const float g = FilterMath::tptGain (cutoffHz, osRate);
         currentCutoffHz = cutoffHz;
 
-        // 2x oversampling: half-way sample, then the real one, averaged.
-        const float a = step (0.5f * (previousInput + x) * driveGain, s, g);
-        const float b = step (x * driveGain, s, g);
+        // Oversampling: run the circuit 1, 2 or 4 times per sample on
+        // in-between input values, then average. Higher = fewer harsh
+        // artefacts from resonance and drive at high notes, more CPU.
+        float sum = 0.0f;
+        for (int k = 1; k <= factor; ++k)
+        {
+            const float t = (float) k / (float) factor;
+            sum += step ((previousInput + (x - previousInput) * t) * driveGain, s, g);
+        }
         previousInput = x;
 
-        return 0.5f * (a + b) * makeup * gateGain * typeTrim (s.type);
+        return sum / (float) factor * makeup * gateGain * (s.levelMatch ? typeTrim (s.type) : 1.0f);
     }
 
 private:
@@ -327,7 +339,7 @@ private:
     // the closer it gets to shut (that's what gives the "bongo" decay).
     void updateGate (float character)
     {
-        const float sr = osRate * 0.5f;
+        const float sr = hostRate;
         if (gateHoldSamples > 0)
         {
             --gateHoldSamples;
@@ -352,11 +364,19 @@ private:
             case FilterType::steinerParker: return 0.9f;
             case FilterType::polivoks:      return 0.85f;
             case FilterType::comb:          return 0.8f;
-            case FilterType::formant:       return 2.0f;
+            case FilterType::formant:       return 1.4f; // capped: resonant vowels peak hard, and slots can stack
             default:                      return 1.0f;
         }
     }
 
+    void setOversampling (int newFactor)
+    {
+        factor = newFactor >= 4 ? 4 : (newFactor <= 1 ? 1 : 2);
+        osRate = hostRate * (float) factor;
+    }
+
+    int   factor = 2;
+    float hostRate = 44100.0f;
     float osRate = 88200.0f;
     OnePole poles[4];
     OnePole hpPoles[2];
