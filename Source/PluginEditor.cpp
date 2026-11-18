@@ -726,6 +726,8 @@ void ModRing::paint (juce::Graphics& g)
         float reach = amount;
         if (Mod::isCutoff (target))
             reach = amount * Mod::cutoffOctavesAtFull / std::log2 (20000.0f / 20.0f);
+        else if (Mod::isRate (target))
+            reach = amount; // the Rate knob is close to octave-even already
         const float from = juce::jlimit (0.0f, 1.0f, value);
         const float to   = juce::jlimit (0.0f, 1.0f, value + reach);
         const float lo   = Mod::isBipolar (s) ? juce::jlimit (0.0f, 1.0f, value - reach) : from;

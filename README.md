@@ -109,6 +109,8 @@ LFO 1, LFO 2, Filter Env, Amp Env, Velocity, Mod Wheel, or Key (which note you p
 2. Drag any knob up or down to set how much the source moves it (hold Shift for fine control). A ring in the source's colour shows the range.
 3. Double-click a knob to disconnect that source. Click the source again when you're done.
 
+LFO **Rate** and **Smooth** can be modulated too, including by the LFOs themselves: put LFO 1 on LFO 2's Rate for a wobble that speeds up and slows down, or an LFO on its own Rate for lopsided, accelerating shapes. For Rate, 100% covers the whole 0.05 to 20 Hz range.
+
 The **Modulation** panel lists every connection with its amount; click × to remove one. Amounts are a share of the knob's full travel (for Cutoff, 100% = 10 octaves). Connections are saved with the project.
 
 The **output meter** next to Volume shows the level in dB: the solid bar is the average, the thin line is the peak, and the white line holds the recent peak. The **CLIP** light turns red if the sound goes over 0 dB and stays on until you click it.
