@@ -3,6 +3,7 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_audio_utils/juce_audio_utils.h>
 #include "SynthEngine.h"
+#include "OutputFollower.h"
 
 class SNSynthProcessor : public juce::AudioProcessor
 {
@@ -81,6 +82,7 @@ private:
     static constexpr float limiterCeiling = 0.966f; // -0.3 dB
     std::array<std::vector<float>, 1 + Chain::numBlocks> tapBuffers; // oscillators, then after each chain position
     double currentSampleRate = 44100.0;
+    std::unique_ptr<OutputFollower> outputFollower; // standalone app: follow the Mac's system output
 
     std::atomic<float>* volumeParam = nullptr;
     std::atomic<float>* p (const char* id) { return parameters.getRawParameterValue (id); }

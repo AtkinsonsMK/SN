@@ -24,6 +24,9 @@ SNSynthProcessor::SNSynthProcessor()
         targetParams[(size_t) t] = parameters.getRawParameterValue (Mod::targetIds()[(size_t) t]);
     }
     voiceSettings.mod = &modContext;
+
+    if (wrapperType == wrapperType_Standalone)
+        outputFollower = std::make_unique<OutputFollower>();
 }
 
 float SNSynthProcessor::volumeDbToGain (float db)
