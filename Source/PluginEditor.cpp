@@ -15,20 +15,26 @@ SNSynthEditor::SNSynthEditor (SNSynthProcessor& p)
       processor (p),
       keyboard (p.keyboardState, juce::MidiKeyboardComponent::horizontalKeyboard)
 {
-    volumeKnob.setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
-    volumeKnob.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 80, 20);
-    volumeKnob.setColour (juce::Slider::rotarySliderFillColourId, accent);
-    volumeKnob.setColour (juce::Slider::thumbColourId, text);
-    volumeKnob.setColour (juce::Slider::textBoxOutlineColourId, juce::Colours::transparentBlack);
-    volumeKnob.setWantsKeyboardFocus (false);
-    addAndMakeVisible (volumeKnob);
-    volumeAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (
-        p.parameters, ParamIDs::volume, volumeKnob);
+    using namespace ParamIDs;
 
-    volumeLabel.setText ("Volume", juce::dontSendNotification);
-    volumeLabel.setJustificationType (juce::Justification::centred);
-    volumeLabel.setColour (juce::Label::textColourId, text);
-    addAndMakeVisible (volumeLabel);
+    oscGroup.title = "Oscillator";
+    oscGroup.knobs = { &makeKnob (sawLevel, "Saw"), &makeKnob (pulseLevel, "Pulse"),
+                       &makeKnob (pulseWidth, "Pulse Width"), &makeKnob (subLevel, "Sub") };
+
+    filterEnvGroup.title = "Filter Envelope";
+    filterEnvGroup.knobs = { &makeKnob (fenvAttack, "Attack"), &makeKnob (fenvDecay, "Decay"),
+                             &makeKnob (fenvSustain, "Sustain"), &makeKnob (fenvRelease, "Release") };
+
+    outputGroup.title = "Output";
+    outputGroup.knobs = { &makeKnob (volume, "Volume") };
+
+    ampEnvGroup.title = "Amp Envelope";
+    ampEnvGroup.knobs = { &makeKnob (aenvAttack, "Attack"), &makeKnob (aenvDecay, "Decay"),
+                          &makeKnob (aenvSustain, "Sustain"), &makeKnob (aenvRelease, "Release") };
+
+    movementGroup.title = "Movement";
+    movementGroup.knobs = { &makeKnob (lfoRate, "LFO Rate"), &makeKnob (lfoCutoff, "LFO > Cutoff"),
+                            &makeKnob (drift, "Drift"), &makeKnob (glide, "Glide") };
 
     // Computer keyboard: A W S E D F T G Y H U J K O L P ; plays notes.
     keyboard.setKeyPressBaseOctave (baseOctave);
@@ -50,7 +56,43 @@ SNSynthEditor::SNSynthEditor (SNSynthProcessor& p)
     addAndMakeVisible (hintLabel);
 
     setWantsKeyboardFocus (true);
-    setSize (760, 360);
+    setSize (860, 530);
+}
+
+Knob& SNSynthEditor::makeKnob (const char* paramId, const juce::String& labelText)
+{
+    auto k = std::make_unique<Knob>();
+    k->slider.setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
+    k->slider.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 78, 18);
+    k->slider.setColour (juce::Slider::rotarySliderFillColourId, accent);
+    k->slider.setColour (juce::Slider::thumbColourId, text);
+    k->slider.setColour (juce::Slider::textBoxOutlineColourId, juce::Colours::transparentBlack);
+    k->slider.setWantsKeyboardFocus (false);
+    addAndMakeVisible (k->slider);
+    k->attachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (
+        processor.parameters, paramId, k->slider);
+
+    k->label.setText (labelText, juce::dontSendNotification);
+    k->label.setJustificationType (juce::Justification::centred);
+    k->label.setColour (juce::Label::textColourId, text);
+    k->label.setFont (juce::FontOptions (13.0f));
+    addAndMakeVisible (k->label);
+
+    knobs.push_back (std::move (k));
+    return *knobs.back();
+}
+
+void SNSynthEditor::layoutGroup (KnobGroup& group, juce::Rectangle<int> area)
+{
+    group.bounds = area;
+    auto inner = area.reduced (6).withTrimmedTop (22);
+    const int w = inner.getWidth() / (int) group.knobs.size();
+    for (auto* k : group.knobs)
+    {
+        auto cell = inner.removeFromLeft (w);
+        k->label.setBounds (cell.removeFromTop (18));
+        k->slider.setBounds (cell.reduced (4, 0));
+    }
 }
 
 void SNSynthEditor::visibilityChanged()
@@ -101,19 +143,37 @@ void SNSynthEditor::paint (juce::Graphics& g)
 
     g.setColour (dimText);
     g.setFont (juce::FontOptions (13.0f));
-    g.drawText ("v" + juce::String (JucePlugin_VersionString) + "  ·  step 1",
+    g.drawText ("v" + juce::String (JucePlugin_VersionString) + "  ·  step 2",
                 header, juce::Justification::centredRight);
 
-    g.setColour (panel);
-    g.fillRoundedRectangle (juce::Rectangle<float> (20.0f, 64.0f, 140.0f, 150.0f), 8.0f);
+    for (auto* group : { &oscGroup, &filterEnvGroup, &outputGroup, &ampEnvGroup, &movementGroup })
+    {
+        g.setColour (panel);
+        g.fillRoundedRectangle (group->bounds.toFloat(), 8.0f);
+        g.setColour (dimText);
+        g.setFont (juce::FontOptions (12.0f, juce::Font::bold));
+        g.drawText (group->title.toUpperCase(), group->bounds.reduced (10, 6).removeFromTop (16),
+                    juce::Justification::centredLeft);
+    }
 }
 
 void SNSynthEditor::resized()
 {
-    volumeLabel.setBounds (20, 70, 140, 20);
-    volumeKnob.setBounds (35, 92, 110, 116);
-
     auto area = getLocalBounds().reduced (20);
+    area.removeFromTop (44);
+
+    const int knobW = 84, rowH = 150, gap = 10;
+
+    auto row1 = area.removeFromTop (rowH);
+    layoutGroup (oscGroup,       row1.removeFromLeft (knobW * 4)); row1.removeFromLeft (gap);
+    layoutGroup (filterEnvGroup, row1.removeFromLeft (knobW * 4)); row1.removeFromLeft (gap);
+    layoutGroup (outputGroup,    row1);
+
+    area.removeFromTop (gap);
+    auto row2 = area.removeFromTop (rowH);
+    layoutGroup (ampEnvGroup,   row2.removeFromLeft (knobW * 4)); row2.removeFromLeft (gap);
+    layoutGroup (movementGroup, row2.removeFromLeft (knobW * 4));
+
     auto bottom = area.removeFromBottom (110);
     auto hintRow = bottom.removeFromTop (24);
     octaveLabel.setBounds (hintRow.removeFromRight (180));

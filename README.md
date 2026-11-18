@@ -3,8 +3,10 @@
 A small analogue-style subtractive synthesizer for macOS, as a standalone app
 and as a VST3 / AU plugin for FL Studio and other DAWs.
 
-**Status: step 1 of 4.** One sawtooth voice (8-voice polyphonic), a Volume
-knob, and an on-screen keyboard you can play from your computer keyboard.
+**Status: step 2 of 4.** The sound engine: one oscillator (Saw, Pulse, Sub),
+filter and amp envelopes, an LFO, Drift and Glide, 8 voices, and an on-screen
+keyboard you can play from your computer keyboard. A simple temporary filter
+is in place until the filter rack arrives in step 3.
 
 ## Install (Mac)
 
@@ -38,9 +40,25 @@ Every control can be automated in FL Studio. The full list of controls, with
 ranges and defaults, is in the project's *Synth sound concept and parameters*
 document.
 
-| Control | Range | Default |
-|---|---|---|
-| Volume | -inf to +6 dB | -6 dB |
+| Group | Control | Range | Default |
+|---|---|---|---|
+| Oscillator | Saw Level | 0 to 100% | 100% |
+| | Pulse Level | 0 to 100% | 0% |
+| | Pulse Width | 5 to 95% | 50% |
+| | Sub Level | 0 to 100% | 0% |
+| Filter Envelope | Attack | 0.5 ms to 10 s | 1 ms |
+| | Decay | 1 ms to 10 s | 400 ms |
+| | Sustain | 0 to 100% | 30% |
+| | Release | 1 ms to 15 s | 300 ms |
+| Amp Envelope | Attack | 0.5 ms to 10 s | 1 ms |
+| | Decay | 1 ms to 10 s | 300 ms |
+| | Sustain | 0 to 100% | 100% |
+| | Release | 1 ms to 15 s | 200 ms |
+| Movement | LFO Rate | 0.05 to 20 Hz | 4 Hz |
+| | LFO to Cutoff | 0 to 100% | 0% |
+| | Drift | 0 to 100% (up to about ±10 cents) | 15% |
+| | Glide | 0 to 2 s | 0 s |
+| Output | Volume | -inf to +6 dB | -6 dB |
 
 ## Building from source
 

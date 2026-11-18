@@ -2,6 +2,7 @@
 
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_audio_utils/juce_audio_utils.h>
+#include "SynthVoice.h"
 
 class SNSynthProcessor : public juce::AudioProcessor
 {
@@ -39,8 +40,17 @@ public:
     juce::MidiKeyboardState keyboardState;
 
 private:
+    void updateVoiceSettings();
+    void renderLfo (int numSamples);
+
     juce::Synthesiser synth;
+    VoiceSettings voiceSettings;
+    std::vector<float> lfoBuffer;
+    double lfoPhase = 0.0;
+    double currentSampleRate = 44100.0;
+
     std::atomic<float>* volumeParam = nullptr;
+    std::atomic<float>* p (const char* id) { return parameters.getRawParameterValue (id); }
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Multiplicative> outputGain;
 
     static float volumeDbToGain (float db);

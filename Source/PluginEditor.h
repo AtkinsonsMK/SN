@@ -2,6 +2,22 @@
 
 #include "PluginProcessor.h"
 
+// One labelled knob attached to a parameter.
+struct Knob
+{
+    juce::Slider slider;
+    juce::Label  label;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> attachment;
+};
+
+// A titled panel of knobs.
+struct KnobGroup
+{
+    juce::String title;
+    std::vector<Knob*> knobs;
+    juce::Rectangle<int> bounds;
+};
+
 class SNSynthEditor : public juce::AudioProcessorEditor
 {
 public:
@@ -14,14 +30,15 @@ public:
     void visibilityChanged() override;
 
 private:
+    Knob& makeKnob (const char* paramId, const juce::String& label);
+    void layoutGroup (KnobGroup&, juce::Rectangle<int> area);
     void shiftOctave (int delta);
     void updateOctaveLabel();
 
     SNSynthProcessor& processor;
 
-    juce::Slider volumeKnob;
-    juce::Label  volumeLabel;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> volumeAttachment;
+    std::vector<std::unique_ptr<Knob>> knobs;
+    KnobGroup oscGroup, filterEnvGroup, ampEnvGroup, movementGroup, outputGroup;
 
     juce::MidiKeyboardComponent keyboard;
     juce::Label octaveLabel;

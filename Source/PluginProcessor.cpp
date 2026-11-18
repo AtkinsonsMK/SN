@@ -1,7 +1,6 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 #include "Parameters.h"
-#include "SynthVoice.h"
 
 SNSynthProcessor::SNSynthProcessor()
     : AudioProcessor (BusesProperties().withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
@@ -10,7 +9,7 @@ SNSynthProcessor::SNSynthProcessor()
     volumeParam = parameters.getRawParameterValue (ParamIDs::volume);
 
     for (int i = 0; i < numVoices; ++i)
-        synth.addVoice (new SynthVoice());
+        synth.addVoice (new SynthVoice (voiceSettings, i));
 
     synth.addSound (new SynthSound());
 }
@@ -22,8 +21,12 @@ float SNSynthProcessor::volumeDbToGain (float db)
     return db <= -60.0f ? 1.0e-5f : juce::Decibels::decibelsToGain (db);
 }
 
-void SNSynthProcessor::prepareToPlay (double sampleRate, int)
+void SNSynthProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
+    currentSampleRate = sampleRate;
+    lfoBuffer.assign ((size_t) juce::jmax (samplesPerBlock, 512), 0.0f);
+    voiceSettings.lastNote = -1.0;
+    updateVoiceSettings();
     synth.setCurrentPlaybackSampleRate (sampleRate);
     keyboardState.reset();
 
@@ -45,6 +48,8 @@ void SNSynthProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
     // Merges notes from the on-screen / computer keyboard into the incoming MIDI.
     keyboardState.processNextMidiBuffer (midi, 0, buffer.getNumSamples(), true);
 
+    updateVoiceSettings();
+    renderLfo (buffer.getNumSamples());
     synth.renderNextBlock (buffer, midi, 0, buffer.getNumSamples());
 
     outputGain.setTargetValue (volumeDbToGain (volumeParam->load()));
@@ -57,6 +62,46 @@ void SNSynthProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
         for (int ch = 0; ch < numChannels; ++ch)
             buffer.getWritePointer (ch)[i] *= g;
     }
+}
+
+void SNSynthProcessor::updateVoiceSettings()
+{
+    auto& v = voiceSettings;
+    v.sawLevel    = p (ParamIDs::sawLevel)->load()   * 0.01f;
+    v.pulseLevel  = p (ParamIDs::pulseLevel)->load() * 0.01f;
+    v.pulseWidth  = p (ParamIDs::pulseWidth)->load() * 0.01f;
+    v.subLevel    = p (ParamIDs::subLevel)->load()   * 0.01f;
+
+    v.fenvA = p (ParamIDs::fenvAttack)->load();
+    v.fenvD = p (ParamIDs::fenvDecay)->load();
+    v.fenvS = p (ParamIDs::fenvSustain)->load() * 0.01f;
+    v.fenvR = p (ParamIDs::fenvRelease)->load();
+
+    v.aenvA = p (ParamIDs::aenvAttack)->load();
+    v.aenvD = p (ParamIDs::aenvDecay)->load();
+    v.aenvS = p (ParamIDs::aenvSustain)->load() * 0.01f;
+    v.aenvR = p (ParamIDs::aenvRelease)->load();
+
+    v.lfoToCutoff  = p (ParamIDs::lfoCutoff)->load() * 0.01f;
+    v.drift        = p (ParamIDs::drift)->load() * 0.01f;
+    v.glideSeconds = p (ParamIDs::glide)->load();
+}
+
+void SNSynthProcessor::renderLfo (int numSamples)
+{
+    if ((int) lfoBuffer.size() < numSamples)
+        lfoBuffer.resize ((size_t) numSamples); // only if the host exceeds its announced block size
+
+    // Triangle LFO, free-running so it keeps its place between notes.
+    const double inc = p (ParamIDs::lfoRate)->load() / currentSampleRate;
+    for (int i = 0; i < numSamples; ++i)
+    {
+        lfoBuffer[(size_t) i] = (float) (lfoPhase < 0.5 ? 4.0 * lfoPhase - 1.0 : 3.0 - 4.0 * lfoPhase);
+        lfoPhase += inc;
+        if (lfoPhase >= 1.0)
+            lfoPhase -= 1.0;
+    }
+    voiceSettings.lfo = lfoBuffer.data();
 }
 
 juce::AudioProcessorEditor* SNSynthProcessor::createEditor()
