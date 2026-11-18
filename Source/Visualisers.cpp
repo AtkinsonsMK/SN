@@ -59,6 +59,40 @@ namespace
             case FilterType::lowpassGate:
                 return std::abs (twoPole (FilterShape::gateDamping (res)));
 
+            case FilterType::steinerParker:
+            case FilterType::polivoks:
+            {
+                const bool steiner = type == FilterType::steinerParker;
+                const float d = std::max (steiner ? FilterShape::steinerDamping (res) : FilterShape::polivoksDamping (res), 0.02f);
+                const C den = s * s + d * s + 1.0f;
+                const int mode = steiner ? FilterShape::steinerMode (character) : FilterShape::polivoksMode (character);
+                if (mode == 0) return std::abs (1.0f / den);
+                if (mode == 1) return std::abs (s / den) * 1.5f;
+                return std::abs (s * s / den);
+            }
+
+            case FilterType::comb:
+            {
+                // Feedback comb: peaks at multiples of the cutoff frequency.
+                const float fb = FilterShape::combFeedback (res, character);
+                const C z = std::exp (C (0.0f, -2.0f * FilterMath::pi * hz / cutoff));
+                return std::abs (1.0f / (1.0f - fb * z)) * (1.0f - 0.5f * std::abs (fb));
+            }
+
+            case FilterType::formant:
+            {
+                const auto& vowel = FilterShape::formantTable()[FilterShape::formantVowel (character)];
+                const float scale = cutoff / FilterShape::formantReferenceHz;
+                const float d = 1.0f / FilterShape::formantQ (res);
+                C sum (0.0f, 0.0f);
+                for (int b = 0; b < 3; ++b)
+                {
+                    const C sb (0.0f, hz / (vowel[b][0] * scale));
+                    sum += (sb / (sb * sb + d * sb + 1.0f)) * d * 2.0f * vowel[b][1];
+                }
+                return std::abs (sum) * 2.5f;
+            }
+
             default:
                 return 1.0f;
         }
@@ -83,54 +117,51 @@ namespace
 //==============================================================================
 void Scope::paint (juce::Graphics& g)
 {
+    // A still picture of the wave the oscillator settings make: two cycles, so
+    // the Sub (one octave down) completes one cycle. It only changes when you
+    // change a setting. The live, moving signal is in the Numbers window.
     paintScreen (g);
-    auto r = getLocalBounds().toFloat().reduced (4.0f);
+    auto r = getLocalBounds().toFloat().reduced (6.0f, 5.0f);
     g.setColour (Colours::grid);
     g.drawHorizontalLine ((int) r.getCentreY(), r.getX(), r.getRight());
 
-    auto& live = processor.live;
-    const float hz = live.noteHz.load();
-    const double sr = processor.getSampleRate() > 0 ? processor.getSampleRate() : 48000.0;
-    if (! live.noteActive.load() || hz <= 0.0f)
+    const float saw   = param (ParamIDs::sawLevel)   * 0.01f;
+    const float pulse = param (ParamIDs::pulseLevel) * 0.01f;
+    const float width = param (ParamIDs::pulseWidth) * 0.01f;
+    const float sub   = param (ParamIDs::subLevel)   * 0.01f;
+
+    const int n = juce::jmax (2, (int) r.getWidth());
+    std::vector<float> wave ((size_t) n + 1);
+    float peak = 0.0f;
+    for (int i = 0; i <= n; ++i)
+    {
+        const float t = 2.0f * (float) i / (float) n;       // 0..2 cycles
+        const float ph = t - std::floor (t);
+        const float subPh = 0.5f * t;
+        const float v = saw * (2.0f * ph - 1.0f)
+                      + pulse * ((ph < width ? 1.0f : -1.0f) - (2.0f * width - 1.0f))
+                      + sub * (subPh < 0.5f ? 1.0f : -1.0f);
+        wave[(size_t) i] = v;
+        peak = std::max (peak, std::abs (v));
+    }
+
+    if (peak < 1.0e-4f)
     {
         g.setColour (Colours::text);
         g.setFont (11.0f);
-        g.drawText ("play a note", r, juce::Justification::centred);
+        g.drawText ("all levels at 0", r, juce::Justification::centred);
         return;
     }
 
-    // Two cycles of the newest note, lined up on a rising zero crossing.
-    const int period = juce::jlimit (8, 4096, (int) (sr / hz));
-    const int window = juce::jmin (2 * period, 6000);
-    std::vector<LiveInfo::Frame> frames ((size_t) (window + period + 1));
-    live.copyLatest (frames.data(), (int) frames.size());
-
-    int start = 0;
-    for (int i = 1; i <= period; ++i)
-        if (frames[(size_t) i - 1].v[0] < 0.0f && frames[(size_t) i].v[0] >= 0.0f) { start = i; break; }
-
-    for (int stage : { 5, 0 }) // output underneath, oscillator on top
+    juce::Path p;
+    for (int i = 0; i <= n; ++i)
     {
-        float peak = 0.02f;
-        for (int i = 0; i < window; ++i)
-            peak = std::max (peak, std::abs (frames[(size_t) (start + i)].v[stage]));
-
-        juce::Path p;
-        for (int i = 0; i < window; ++i)
-        {
-            const float x = r.getX() + r.getWidth() * (float) i / (float) (window - 1);
-            const float y = r.getCentreY() - frames[(size_t) (start + i)].v[stage] / peak * r.getHeight() * 0.45f;
-            if (i == 0) p.startNewSubPath (x, y); else p.lineTo (x, y);
-        }
-        g.setColour (stage == 0 ? Colours::trace : Colours::trace2.withAlpha (0.8f));
-        g.strokePath (p, juce::PathStrokeType (stage == 0 ? 1.6f : 1.2f));
+        const float x = r.getX() + (float) i;
+        const float y = r.getCentreY() - wave[(size_t) i] / peak * r.getHeight() * 0.46f;
+        if (i == 0) p.startNewSubPath (x, y); else p.lineTo (x, y);
     }
-
-    g.setColour (Colours::text);
-    g.setFont (10.0f);
-    g.drawText ("osc", r.removeFromTop (12.0f), juce::Justification::topLeft);
-    g.setColour (Colours::trace2);
-    g.drawText ("out", r.removeFromTop (12.0f), juce::Justification::topLeft);
+    g.setColour (Colours::trace);
+    g.strokePath (p, juce::PathStrokeType (1.6f));
 }
 
 //==============================================================================
@@ -152,7 +183,7 @@ void FilterCurve::paint (juce::Graphics& g)
     {
         g.setColour (Colours::text);
         g.setFont (11.0f);
-        g.drawText (type == FilterType::off ? "off: sound passes straight through" : "coming in a later build",
+        g.drawText ("off: sound passes straight through",
                     r, juce::Justification::centred);
         return;
     }

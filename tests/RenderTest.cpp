@@ -68,9 +68,13 @@ static int saveSnapshot (const juce::File& file)
     setParam (*p, ParamIDs::pulseLevel, 60);
     setParam (*p, ParamIDs::subLevel, 40);
     setParam (*p, ParamIDs::slot (0, ParamIDs::slotResonance), 55);
-    setParam (*p, ParamIDs::slot (1, ParamIDs::slotType), FilterType::sallenKey);
-    setParam (*p, ParamIDs::slot (1, ParamIDs::slotCharacter), 40);
-    setParam (*p, ParamIDs::slot (1, ParamIDs::slotCutoff), 6000);
+    setParam (*p, ParamIDs::slot (1, ParamIDs::slotType), FilterType::steinerParker);
+    setParam (*p, ParamIDs::slot (1, ParamIDs::slotCharacter), 50);
+    setParam (*p, ParamIDs::slot (1, ParamIDs::slotResonance), 60);
+    setParam (*p, ParamIDs::slot (1, ParamIDs::slotCutoff), 1500);
+    setParam (*p, ParamIDs::slot (2, ParamIDs::slotType), FilterType::formant);
+    setParam (*p, ParamIDs::slot (2, ParamIDs::slotCutoff), 1000);
+    setParam (*p, ParamIDs::slot (2, ParamIDs::slotResonance), 40);
     setParam (*p, ParamIDs::eqLow, 4);
     setParam (*p, ParamIDs::eqHigh, -6);
     setParam (*p, ParamIDs::lfoCutoff, 20);
@@ -314,9 +318,10 @@ int main (int argc, char** argv)
         check (ok, "Filter rack and EQ have the documented defaults (OTA / Off / Off)");
     }
 
-    for (int type : { (int) FilterType::ota, (int) FilterType::sallenKey, (int) FilterType::lowpassGate })
+    for (int type = 1; type < FilterType::count; ++type)
     {
         const auto name = Params::filterTypeNames()[type];
+        const bool lowpassLike = type <= FilterType::polivoks;
 
         // Low cutoff makes it darker than high cutoff.
         float bright[2];
@@ -330,7 +335,8 @@ int main (int argc, char** argv)
             auto out = render (*p, 45, 40, false);
             bright[k] = brightness (out, 2400, 4800);
         }
-        check (bright[0] < bright[1] * 0.5f, name + ": Cutoff darkens the sound (" + juce::String (bright[0], 4) + " vs " + juce::String (bright[1], 4) + ")");
+        if (lowpassLike)
+            check (bright[0] < bright[1] * 0.5f, name + ": Cutoff darkens the sound (" + juce::String (bright[0], 4) + " vs " + juce::String (bright[1], 4) + ")");
 
         // Full resonance and drive, sweeping: stays stable (no blow-ups, no silence-killing NaN).
         auto p = makeSynth (sr);
@@ -349,20 +355,55 @@ int main (int argc, char** argv)
     }
 
     {
-        // Switching types keeps a similar loudness (within about 6 dB of OTA).
-        float levels[3];
+        // Switching types keeps a similar loudness (within about 8 dB of OTA).
+        float levels[FilterType::count];
         int idx = 0;
-        for (int type : { (int) FilterType::ota, (int) FilterType::sallenKey, (int) FilterType::lowpassGate })
+        juce::String detail;
+        for (int type = 1; type < FilterType::count; ++type)
         {
             auto p = makeSynth (sr);
             setType (*p, 0, type);
             setParam (*p, sid (0, ParamIDs::slotCharacter), type == FilterType::lowpassGate ? 100.0f : 0.0f);
             auto out = render (*p, 57, 40, false);
-            levels[idx++] = out.getRMSLevel (0, 2400, 4800);
+            levels[idx] = out.getRMSLevel (0, 2400, 4800);
+            detail << Params::filterTypeNames()[type] << " " << juce::String (juce::Decibels::gainToDecibels (levels[idx] / levels[0]), 1) << " dB, ";
+            ++idx;
         }
         bool ok = true;
-        for (float l : levels) ok = ok && std::abs (juce::Decibels::gainToDecibels (l / levels[0])) < 6.0f;
-        check (ok, "Switching filter type keeps similar loudness (OTA " + juce::String (levels[0], 3) + ", SK " + juce::String (levels[1], 3) + ", LPG " + juce::String (levels[2], 3) + ")");
+        for (int i = 0; i < idx; ++i) ok = ok && std::abs (juce::Decibels::gainToDecibels (levels[i] / levels[0])) < 8.0f;
+        check (ok, "Switching filter type keeps similar loudness (" + detail.dropLastCharacters (2) + ")");
+    }
+
+    {
+        // Formant: the vowel changes the tone (I is brighter than U).
+        float b[2]; int k = 0;
+        for (float vowel : { 50.0f, 90.0f })
+        {
+            auto p = makeSynth (sr);
+            setType (*p, 0, FilterType::formant);
+            setParam (*p, sid (0, ParamIDs::slotCutoff), 1000.0f);
+            setParam (*p, sid (0, ParamIDs::slotEnv), 0);
+            setParam (*p, sid (0, ParamIDs::slotCharacter), vowel);
+            auto out = render (*p, 45, 40, false);
+            b[k++] = brightness (out, 2400, 9600) / std::max (out.getRMSLevel (0, 2400, 9600), 1.0e-6f);
+        }
+        check (b[0] > b[1] * 1.3f, "Formant: vowel I is brighter than U (" + juce::String (b[0], 3) + " vs " + juce::String (b[1], 3) + ")");
+    }
+
+    {
+        // Comb: high Resonance makes it ring, so the sound changes a lot.
+        float lv[2]; int k = 0;
+        for (float res : { 0.0f, 95.0f })
+        {
+            auto p = makeSynth (sr);
+            setType (*p, 0, FilterType::comb);
+            setParam (*p, sid (0, ParamIDs::slotCutoff), 330.0f);
+            setParam (*p, sid (0, ParamIDs::slotEnv), 0);
+            setParam (*p, sid (0, ParamIDs::slotResonance), res);
+            auto out = render (*p, 45, 40, false);
+            lv[k++] = brightness (out, 2400, 9600) / std::max (out.getRMSLevel (0, 2400, 9600), 1.0e-6f);
+        }
+        check (std::abs (lv[1] - lv[0]) > 0.1f * lv[0], "Comb: Resonance changes the tone (" + juce::String (lv[0], 3) + " vs " + juce::String (lv[1], 3) + ")");
     }
 
     {

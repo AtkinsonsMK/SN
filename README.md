@@ -6,8 +6,7 @@ and as a VST3 / AU plugin for FL Studio and other DAWs.
 **Status: step 4 of 4.** Live displays (scope, filter curves, envelope and
 LFO shapes, EQ curve) and a Numbers window showing the sample values at each
 stage. Under the hood: One oscillator (Saw, Pulse, Sub), filter and amp
-envelopes, an LFO, Drift and Glide, a three-slot filter rack (OTA, Sallen-Key
-and Lowpass Gate so far), a 3-band EQ, 8 voices, and an on-screen keyboard you
+envelopes, an LFO, Drift and Glide, a three-slot filter rack (all seven types), a 3-band EQ, 8 voices, and an on-screen keyboard you
 can play from your computer keyboard. 38 controls in all.
 
 ## Install (Mac)
@@ -30,10 +29,11 @@ from the plugin list (as a generator). Either the VST3 or the AU version works.
 
 ## Playing
 
-- **Computer keyboard** (same layout as Pigments and Ableton Live):
-  white keys `A S D F G H J K L ; '`, black keys `W E T Y U O P`;
-  **Z / X** octave down / up, **C / V** velocity down / up. Notes keep
-  playing while you move knobs and menus with the mouse.
+- **Computer keyboard** (FL Studio layout, two rows):
+  lower octave `Z S X D C V G B H N J M , L . ; /` (Z = C3),
+  upper octave `Q 2 W 3 E R 5 T 6 Y 7 U I 9 O 0 P [ = ]` (Q = C4).
+  The - / + buttons beside the keyboard move both rows by an octave.
+  Notes keep playing while you move knobs and menus with the mouse.
 - **MIDI keyboard**: in the standalone app, click **Options** to choose your
   MIDI input and audio output. In FL Studio, MIDI comes through FL as usual.
 
@@ -61,12 +61,12 @@ document.
 | | LFO to Cutoff | 0 to 100% | 0% |
 | | Drift | 0 to 100% (up to about ±10 cents) | 15% |
 | | Glide | 0 to 2 s | 0 s |
-| Filter 1, 2, 3 | Type | Off, OTA, Sallen-Key, Lowpass Gate (Steiner-Parker, Polivoks, Comb, Formant coming) | OTA / Off / Off |
+| Filter 1, 2, 3 | Type | Off, OTA, Sallen-Key, Lowpass Gate, Steiner-Parker, Polivoks, Comb, Formant | OTA / Off / Off |
 | | Cutoff | 20 Hz to 20 kHz | 5 kHz / 2 kHz / 2 kHz |
 | | Resonance | 0 to 100% | 15% |
 | | Drive | 0 to 100% | 0% |
 | | Env Amount | -100 to +100% | +40% / 0% / 0% |
-| | Type knob | OTA: Slope 24/12 dB; Sallen-Key: HP Cutoff 20 Hz to 2 kHz; Lowpass Gate: Gate Decay 0.12 to 3 s | 0% |
+| | Type knob | OTA: Slope 24/12 dB; Sallen-Key: HP Cutoff 20 Hz to 2 kHz; Lowpass Gate: Gate Decay 0.12 to 3 s; Steiner-Parker: Mode LP/BP/HP; Polivoks: Mode LP/BP; Comb: Polarity +/-; Formant: Vowel A/E/I/O/U (Cutoff 1 kHz = natural voice) | 0% |
 | EQ | Low (shelf 100 Hz) | -12 to +12 dB | 0 dB |
 | | Mid (bell 1 kHz) | -12 to +12 dB | 0 dB |
 | | High (shelf 8 kHz) | -12 to +12 dB | 0 dB |

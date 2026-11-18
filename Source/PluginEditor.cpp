@@ -86,12 +86,23 @@ SNSynthEditor::SNSynthEditor (SNSynthProcessor& p)
     keyboard.setWantsKeyboardFocus (false);
     addAndMakeVisible (keyboard);
 
+    for (auto* b : { &octaveDown, &octaveUp })
+    {
+        b->setWantsKeyboardFocus (false);
+        b->setColour (juce::TextButton::buttonColourId, panel);
+        addAndMakeVisible (*b);
+    }
+    octaveDown.setTooltip ("Computer keyboard: octave down");
+    octaveUp.setTooltip ("Computer keyboard: octave up");
+    octaveDown.onClick = [this] { shiftOctave (-1); };
+    octaveUp.onClick   = [this] { shiftOctave (+1); };
+
     octaveLabel.setColour (juce::Label::textColourId, accent);
     octaveLabel.setJustificationType (juce::Justification::centredRight);
     addAndMakeVisible (octaveLabel);
     updateOctaveLabel();
 
-    hintLabel.setText ("Computer keyboard: A S D F G H J K L ; = white keys, W E T Y U O P = black keys.  Z / X octave, C / V velocity.",
+    hintLabel.setText ("Computer keyboard (FL Studio layout): Z S X D C V ... lower octave, Q 2 W 3 E R ... upper octave.",
                        juce::dontSendNotification);
     hintLabel.setColour (juce::Label::textColourId, dimText);
     addAndMakeVisible (hintLabel);
@@ -120,7 +131,7 @@ void SNSynthEditor::setupSlot (SlotPanel& sp, int slotIndex)
     const auto& names = Params::filterTypeNames();
     for (int t = 0; t < names.size(); ++t)
     {
-        sp.type.addItem (FilterType::isAvailable (t) ? names[t] : names[t] + " (coming)", t + 1);
+        sp.type.addItem (names[t], t + 1);
         sp.type.setItemEnabled (t + 1, FilterType::isAvailable (t));
     }
     sp.type.setWantsKeyboardFocus (false);
@@ -194,6 +205,22 @@ void SNSynthEditor::updateSlotTypeDisplay (SlotPanel& sp)
                 const double sec = 0.12 * std::pow (25.0, v / 100.0);
                 return sec < 1.0 ? juce::String (juce::roundToInt (sec * 1000.0)) + " ms" : juce::String (sec, 2) + " s";
             };
+            break;
+        case FilterType::steinerParker:
+            label = "Mode";
+            text = [] (double v) { const char* m[] = { "Low-pass", "Band-pass", "High-pass" }; return juce::String (m[FilterShape::steinerMode ((float) v / 100.0f)]); };
+            break;
+        case FilterType::polivoks:
+            label = "Mode";
+            text = [] (double v) { return juce::String (FilterShape::polivoksMode ((float) v / 100.0f) == 0 ? "Low-pass" : "Band-pass"); };
+            break;
+        case FilterType::comb:
+            label = "Polarity";
+            text = [] (double v) { return juce::String (v < 50.0 ? "+ bright" : "- hollow"); };
+            break;
+        case FilterType::formant:
+            label = "Vowel";
+            text = [] (double v) { const char* m[] = { "A", "E", "I", "O", "U" }; return juce::String (m[FilterShape::formantVowel ((float) v / 100.0f)]); };
             break;
         default:
             text = [] (double v) { return juce::String (juce::roundToInt (v)) + "%"; };
@@ -291,9 +318,15 @@ void SNSynthEditor::parentHierarchyChanged()
     }
 }
 
-// Same layout as Arturia Pigments and Ableton Live:
-// A W S E D F T G Y H U J K O L P ; ' play C up to the F an octave above.
-const char* SNSynthEditor::noteKeys = "awsedftgyhujkolp;'";
+// FL Studio / tracker layout, two rows:
+//   lower:  Z S X D C V G B H N J M , L . ; /   (Z = C3)
+//   upper:  Q 2 W 3 E R 5 T 6 Y 7 U I 9 O 0 P [ = ]   (Q = C4)
+const SNSynthEditor::NoteKey SNSynthEditor::noteKeys[] = {
+    { 'z', 0 }, { 's', 1 }, { 'x', 2 }, { 'd', 3 }, { 'c', 4 }, { 'v', 5 }, { 'g', 6 }, { 'b', 7 },
+    { 'h', 8 }, { 'n', 9 }, { 'j', 10 }, { 'm', 11 }, { ',', 12 }, { 'l', 13 }, { '.', 14 }, { ';', 15 }, { '/', 16 },
+    { 'q', 12 }, { '2', 13 }, { 'w', 14 }, { '3', 15 }, { 'e', 16 }, { 'r', 17 }, { '5', 18 }, { 't', 19 },
+    { '6', 20 }, { 'y', 21 }, { '7', 22 }, { 'u', 23 }, { 'i', 24 }, { '9', 25 }, { 'o', 26 }, { '0', 27 },
+    { 'p', 28 }, { '[', 29 }, { '=', 30 }, { ']', 31 } };
 
 bool SNSynthEditor::keyPressed (const juce::KeyPress& key)
 {
@@ -322,12 +355,6 @@ bool SNSynthEditor::handleKeyPress (const juce::KeyPress& key)
     if (mods.isCommandDown() || mods.isCtrlDown() || mods.isAltDown())
         return false;
 
-    const auto c = juce::CharacterFunctions::toLowerCase (key.getTextCharacter());
-    if (c == 'z') { shiftOctave (-1); return true; }
-    if (c == 'x') { shiftOctave (+1); return true; }
-    if (c == 'c') { changeVelocity (-20); return true; }
-    if (c == 'v') { changeVelocity (+20); return true; }
-
     updateHeldKeys();
 
     // Swallow every other plain key, so macOS doesn't play its "bonk" sound.
@@ -337,14 +364,14 @@ bool SNSynthEditor::handleKeyPress (const juce::KeyPress& key)
 bool SNSynthEditor::updateHeldKeys()
 {
     bool any = false;
-    for (int i = 0; noteKeys[i] != 0; ++i)
+    for (size_t i = 0; i < numNoteKeys; ++i)
     {
-        const bool down = juce::KeyPress ((int) noteKeys[i]).isCurrentlyDown();
-        auto& held = heldNotes[(size_t) i];
+        const bool down = juce::KeyPress ((int) noteKeys[i].key).isCurrentlyDown();
+        auto& held = heldNotes[i];
 
         if (down && held < 0)
         {
-            held = 12 * baseOctave + i;
+            held = 12 * (baseOctave + 1) + noteKeys[i].semitone; // octave 3: Z = C3 = MIDI 48
             if (held <= 127)
                 processor.keyboardState.noteOn (1, held, (float) velocity / 127.0f);
             any = true;
@@ -363,20 +390,15 @@ bool SNSynthEditor::updateHeldKeys()
 void SNSynthEditor::shiftOctave (int delta)
 {
     // Notes already held keep playing until their key is released.
-    baseOctave = juce::jlimit (2, 8, baseOctave + delta);
+    baseOctave = juce::jlimit (0, 6, baseOctave + delta);
     updateOctaveLabel();
 }
 
-void SNSynthEditor::changeVelocity (int delta)
-{
-    velocity = juce::jlimit (7, 127, velocity + delta);
-    updateOctaveLabel();
-}
 
 void SNSynthEditor::updateOctaveLabel()
 {
     // Shown with the common naming where middle C is C4.
-    octaveLabel.setText ("A = C" + juce::String (baseOctave - 1) + "   Velocity " + juce::String (velocity),
+    octaveLabel.setText ("Z = C" + juce::String (baseOctave) + ", Q = C" + juce::String (baseOctave + 1),
                          juce::dontSendNotification);
 }
 
@@ -466,7 +488,11 @@ void SNSynthEditor::resized()
 
     auto bottom = area.removeFromBottom (110);
     auto hintRow = bottom.removeFromTop (24);
-    octaveLabel.setBounds (hintRow.removeFromRight (180));
+    octaveUp.setBounds (hintRow.removeFromRight (26).reduced (0, 1));
+    hintRow.removeFromRight (4);
+    octaveDown.setBounds (hintRow.removeFromRight (26).reduced (0, 1));
+    hintRow.removeFromRight (8);
+    octaveLabel.setBounds (hintRow.removeFromRight (150));
     hintLabel.setBounds (hintRow);
     keyboard.setBounds (bottom.withTrimmedTop (4));
 }

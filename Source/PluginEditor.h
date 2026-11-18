@@ -57,7 +57,6 @@ private:
     bool keyStateChanged (bool isKeyDown, juce::Component*) override;
     bool handleKeyPress (const juce::KeyPress&);
     bool updateHeldKeys();
-    void changeVelocity (int delta);
     void shiftOctave (int delta);
     void updateOctaveLabel();
 
@@ -81,10 +80,13 @@ private:
     juce::MidiKeyboardComponent keyboard;
     juce::Label octaveLabel;
     juce::Label hintLabel;
-    int baseOctave = 5; // 5 = MIDI note 60 = middle C (C4)
+    int baseOctave = 3;  // octave of the Z key (Z = C3, Q = C4 = middle C)
     int velocity = 100;
-    static const char* noteKeys;
-    std::array<int, 18> heldNotes {}; // note held by each computer key, or -1
+    struct NoteKey { char key; int semitone; };
+    static constexpr size_t numNoteKeys = 37;
+    static const NoteKey noteKeys[numNoteKeys];
+    std::array<int, numNoteKeys> heldNotes {}; // note held by each computer key, or -1
+    juce::TextButton octaveDown { "-" }, octaveUp { "+" };
     juce::Component* listeningTo = nullptr;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (SNSynthEditor)

@@ -31,8 +31,7 @@ namespace Vis
         SNSynthProcessor& processor;
     };
 
-    // Oscillator scope: two cycles of the newest note, oscillator in orange,
-    // final output in blue, so you can see what the filters did to the shape.
+    // Oscillator shape: a still picture of the wave the oscillator settings make.
     class Scope : public Display
     {
     public:
