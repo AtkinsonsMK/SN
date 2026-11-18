@@ -32,8 +32,33 @@ namespace ParamIDs
     inline constexpr const char* drift     = "drift";
     inline constexpr const char* glide     = "glide";
 
+    // Filter rack: three slots, each with the same six controls.
+    // IDs are "f1_type", "f1_cutoff" ... "f3_char".
+    inline juce::String slot (int slotIndex, const char* control)
+    {
+        return "f" + juce::String (slotIndex + 1) + "_" + control;
+    }
+    inline constexpr const char* slotType      = "type";
+    inline constexpr const char* slotCutoff    = "cutoff";
+    inline constexpr const char* slotResonance = "res";
+    inline constexpr const char* slotDrive     = "drive";
+    inline constexpr const char* slotEnv       = "env";
+    inline constexpr const char* slotCharacter = "char";
+    inline constexpr int numSlots = 3;
+
+    // EQ
+    inline constexpr const char* eqLow  = "eq_low";
+    inline constexpr const char* eqMid  = "eq_mid";
+    inline constexpr const char* eqHigh = "eq_high";
+
     // Output
     inline constexpr const char* volume = "volume";
+}
+
+// Non-automatable settings stored with the project / preset.
+namespace StateIDs
+{
+    inline constexpr const char* slotOrder = "slotOrder"; // e.g. "0,1,2"
 }
 
 namespace Params
@@ -51,7 +76,14 @@ namespace Params
         return String (seconds, 2) + " s";
     }
 
-    inline std::unique_ptr<AudioParameterFloat> percent (const char* id, const String& name,
+    inline const StringArray& filterTypeNames()
+    {
+        static const StringArray names { "Off", "OTA", "Sallen-Key", "Lowpass Gate",
+                                         "Steiner-Parker", "Polivoks", "Comb", "Formant" };
+        return names;
+    }
+
+    inline std::unique_ptr<AudioParameterFloat> percent (const String& id, const String& name,
                                                          float min, float max, float def)
     {
         return std::make_unique<AudioParameterFloat> (
@@ -60,7 +92,7 @@ namespace Params
     }
 
     // Times use a skewed range so short times get most of the knob travel.
-    inline std::unique_ptr<AudioParameterFloat> time (const char* id, const String& name,
+    inline std::unique_ptr<AudioParameterFloat> time (const String& id, const String& name,
                                                       float min, float max, float def, float centre)
     {
         NormalisableRange<float> range (min, max);
@@ -104,6 +136,40 @@ namespace Params
         layout.add (percent (ParamIDs::lfoCutoff, "LFO to Cutoff", 0.0f, 100.0f, 0.0f));
         layout.add (percent (ParamIDs::drift,     "Drift",         0.0f, 100.0f, 15.0f));
         layout.add (time    (ParamIDs::glide,     "Glide",         0.0f, 2.0f,   0.0f, 0.25f));
+
+        // Filter rack (18): defaults are Slot 1 / Slot 2 / Slot 3.
+        for (int i = 0; i < ParamIDs::numSlots; ++i)
+        {
+            const String n = "Filter " + String (i + 1) + " ";
+            layout.add (std::make_unique<AudioParameterChoice> (
+                ParameterID { ParamIDs::slot (i, ParamIDs::slotType), 1 }, n + "Type",
+                filterTypeNames(), i == 0 ? 1 : 0));
+
+            NormalisableRange<float> cutoff (20.0f, 20000.0f);
+            cutoff.setSkewForCentre (1000.0f);
+            layout.add (std::make_unique<AudioParameterFloat> (
+                ParameterID { ParamIDs::slot (i, ParamIDs::slotCutoff), 1 }, n + "Cutoff",
+                cutoff, i == 0 ? 5000.0f : 2000.0f,
+                AudioParameterFloatAttributes().withLabel ("Hz").withStringFromValueFunction (
+                    [] (float v, int) { return v < 1000.0f ? String (roundToInt (v)) + " Hz"
+                                                           : String (v / 1000.0f, 2) + " kHz"; })));
+
+            layout.add (percent (ParamIDs::slot (i, ParamIDs::slotResonance), n + "Resonance", 0.0f, 100.0f, 15.0f));
+            layout.add (percent (ParamIDs::slot (i, ParamIDs::slotDrive),     n + "Drive",     0.0f, 100.0f, 0.0f));
+            layout.add (percent (ParamIDs::slot (i, ParamIDs::slotEnv),       n + "Env Amount", -100.0f, 100.0f, i == 0 ? 40.0f : 0.0f));
+            layout.add (percent (ParamIDs::slot (i, ParamIDs::slotCharacter), n + "Type Knob", 0.0f, 100.0f, 0.0f));
+        }
+
+        // EQ (3)
+        for (auto [id, name] : { std::pair { ParamIDs::eqLow, "EQ Low" },
+                                 std::pair { ParamIDs::eqMid, "EQ Mid" },
+                                 std::pair { ParamIDs::eqHigh, "EQ High" } })
+        {
+            layout.add (std::make_unique<AudioParameterFloat> (
+                ParameterID { id, 1 }, name, NormalisableRange<float> (-12.0f, 12.0f, 0.1f), 0.0f,
+                AudioParameterFloatAttributes().withLabel ("dB").withStringFromValueFunction (
+                    [] (float v, int) { return (v > 0.04f ? "+" : "") + String (v, 1) + " dB"; })));
+        }
 
         // Output: Volume -inf to +6 dB, default -6 dB. The bottom of the
         // range is treated as silence (-inf).

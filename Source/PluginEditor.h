@@ -18,7 +18,20 @@ struct KnobGroup
     juce::Rectangle<int> bounds;
 };
 
-class SNSynthEditor : public juce::AudioProcessorEditor
+// The controls of one filter slot.
+struct SlotPanel
+{
+    int slotIndex = 0;
+    juce::ComboBox type;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> typeAttachment;
+    juce::TextButton moveLeft { "<" }, moveRight { ">" };
+    KnobGroup group;
+    Knob* characterKnob = nullptr;
+    int shownType = -1;
+};
+
+class SNSynthEditor : public juce::AudioProcessorEditor,
+                      private juce::Timer
 {
 public:
     explicit SNSynthEditor (SNSynthProcessor&);
@@ -30,15 +43,20 @@ public:
     void visibilityChanged() override;
 
 private:
-    Knob& makeKnob (const char* paramId, const juce::String& label);
-    void layoutGroup (KnobGroup&, juce::Rectangle<int> area);
+    void timerCallback() override;
+    Knob& makeKnob (const juce::String& paramId, const juce::String& label);
+    void setupSlot (SlotPanel&, int slotIndex);
+    void updateSlotTypeDisplay (SlotPanel&);
+    void layoutGroup (KnobGroup&, juce::Rectangle<int> area, int topExtra = 0);
     void shiftOctave (int delta);
     void updateOctaveLabel();
 
     SNSynthProcessor& processor;
 
     std::vector<std::unique_ptr<Knob>> knobs;
-    KnobGroup oscGroup, filterEnvGroup, ampEnvGroup, movementGroup, outputGroup;
+    KnobGroup oscGroup, filterEnvGroup, ampEnvGroup, movementGroup, eqGroup, outputGroup;
+    std::array<SlotPanel, 3> slots;
+    std::array<int, 3> shownOrder { -1, -1, -1 };
 
     juce::MidiKeyboardComponent keyboard;
     juce::Label octaveLabel;

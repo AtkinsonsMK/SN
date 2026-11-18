@@ -3,10 +3,10 @@
 A small analogue-style subtractive synthesizer for macOS, as a standalone app
 and as a VST3 / AU plugin for FL Studio and other DAWs.
 
-**Status: step 2 of 4.** The sound engine: one oscillator (Saw, Pulse, Sub),
-filter and amp envelopes, an LFO, Drift and Glide, 8 voices, and an on-screen
-keyboard you can play from your computer keyboard. A simple temporary filter
-is in place until the filter rack arrives in step 3.
+**Status: step 3 of 4.** One oscillator (Saw, Pulse, Sub), filter and amp
+envelopes, an LFO, Drift and Glide, a three-slot filter rack (OTA, Sallen-Key
+and Lowpass Gate so far), a 3-band EQ, 8 voices, and an on-screen keyboard you
+can play from your computer keyboard. 38 controls in all.
 
 ## Install (Mac)
 
@@ -58,7 +58,19 @@ document.
 | | LFO to Cutoff | 0 to 100% | 0% |
 | | Drift | 0 to 100% (up to about ±10 cents) | 15% |
 | | Glide | 0 to 2 s | 0 s |
+| Filter 1, 2, 3 | Type | Off, OTA, Sallen-Key, Lowpass Gate (Steiner-Parker, Polivoks, Comb, Formant coming) | OTA / Off / Off |
+| | Cutoff | 20 Hz to 20 kHz | 5 kHz / 2 kHz / 2 kHz |
+| | Resonance | 0 to 100% | 15% |
+| | Drive | 0 to 100% | 0% |
+| | Env Amount | -100 to +100% | +40% / 0% / 0% |
+| | Type knob | OTA: Slope 24/12 dB; Sallen-Key: HP Cutoff 20 Hz to 2 kHz; Lowpass Gate: Gate Decay 0.12 to 3 s | 0% |
+| EQ | Low (shelf 100 Hz) | -12 to +12 dB | 0 dB |
+| | Mid (bell 1 kHz) | -12 to +12 dB | 0 dB |
+| | High (shelf 8 kHz) | -12 to +12 dB | 0 dB |
 | Output | Volume | -inf to +6 dB | -6 dB |
+
+Filter slots run in series; the < > buttons on each slot change the order,
+which is saved with the project.
 
 ## Building from source
 

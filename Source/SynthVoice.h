@@ -4,6 +4,7 @@
 #include <juce_dsp/juce_dsp.h>
 #include <cmath>
 #include "Envelope.h"
+#include "Filters.h"
 
 // Values the processor hands to every voice once per audio block.
 struct VoiceSettings
@@ -14,6 +15,9 @@ struct VoiceSettings
     float lfoToCutoff = 0.0f; // 0..1
     float drift = 0.15f;      // 0..1
     float glideSeconds = 0.0f;
+
+    FilterSlotSettings slots[3];
+    int order[3] = { 0, 1, 2 };   // processing order of the slots
 
     const float* lfo = nullptr; // one LFO value (-1..1) per sample of the current block
     double lastNote = -1.0;     // most recent note played, for Glide
@@ -34,9 +38,6 @@ public:
     static constexpr float  keyTracking             = 0.5f;
     static constexpr float  maxDriftCents           = 10.0f;
 
-    // Temporary filter until the step 3 filter rack: Slot 1 defaults.
-    static constexpr float tempCutoffHz       = 5000.0f;
-    static constexpr float tempEnvAmount      = 0.4f;  // +40%
     static constexpr float envOctavesAtFull   = 6.0f;  // Env Amount 100% sweeps 6 octaves
     static constexpr float lfoOctavesAtFull   = 3.0f;  // LFO to Cutoff 100% = +/- 3 octaves
 
@@ -56,9 +57,8 @@ public:
         ampEnv.setSampleRate (newRate);
         filterEnv.setSampleRate (newRate);
 
-        filter.setType (juce::dsp::StateVariableTPTFilterType::lowpass);
-        filter.prepare ({ newRate, 512, 1 });
-        filter.setResonance (0.85f);
+        for (auto& f : filters)
+            f.prepare ((float) newRate);
 
         smoothCoef = 1.0f - std::exp (-1.0f / (0.005f * (float) newRate)); // 5 ms
         driftCoef  = 1.0f - std::exp (-1.0f / (0.4f  * (float) newRate));  // 0.4 s
@@ -91,10 +91,14 @@ public:
         {
             phase = 0.0;
             subPhase = 0.0;
-            filter.reset();
+            for (auto& f : filters)
+                f.reset();
             sSaw = settings.sawLevel; sPulse = settings.pulseLevel;
             sPw = settings.pulseWidth; sSub = settings.subLevel;
         }
+
+        for (auto& f : filters)
+            f.trigger ((float) sr);
 
         applyEnvelopeSettings();
         ampEnv.noteOn();
@@ -131,8 +135,9 @@ public:
         const double sr = getSampleRate();
         const int numChannels = output.getNumChannels();
         const float keyTrackOct = keyTracking * (float) (targetNote - 60) / 12.0f;
-        const float baseOct = std::log2 (tempCutoffHz) + keyTrackOct;
-        const float maxCutoff = (float) (sr * 0.45);
+        float baseOct[3];
+        for (int s = 0; s < 3; ++s)
+            baseOct[s] = std::log2 (settings.slots[s].cutoffHz) + keyTrackOct;
 
         for (int i = 0; i < numSamples; ++i)
         {
@@ -169,14 +174,19 @@ public:
             const float osc = 0.3f * (sSaw * saw (inc) + sPulse * pulse (inc, sPw) + sSub * sub (inc * 0.5));
             advance (inc);
 
-            // Temporary filter (replaced by the filter rack in step 3).
+            // Filter rack: slots in series, in the chosen order.
             const float fenv = filterEnv.next();
             const float lfo = settings.lfo != nullptr ? settings.lfo[startSample + i] : 0.0f;
-            const float cutoffOct = baseOct
-                                  + fenv * tempEnvAmount * envOctavesAtFull
-                                  + lfo * settings.lfoToCutoff * lfoOctavesAtFull;
-            filter.setCutoffFrequency (juce::jlimit (20.0f, maxCutoff, std::exp2 (cutoffOct)));
-            const float filtered = filter.processSample (0, osc);
+            const float lfoOct = lfo * settings.lfoToCutoff * lfoOctavesAtFull;
+
+            float filtered = osc;
+            for (int n = 0; n < 3; ++n)
+            {
+                const int s = settings.order[n];
+                const auto& slot = settings.slots[s];
+                const float cutoffOct = baseOct[s] + fenv * slot.envAmount * envOctavesAtFull + lfoOct;
+                filtered = filters[s].process (filtered, slot, std::exp2 (juce::jlimit (4.3f, 14.3f, cutoffOct)));
+            }
 
             const float sample = filtered * ampEnv.next() * noteGain;
 
@@ -252,7 +262,7 @@ private:
     juce::Random random;
 
     Envelope ampEnv, filterEnv;
-    juce::dsp::StateVariableTPTFilter<float> filter;
+    FilterSlot filters[3];
 
     int    targetNote    = 60;
     double currentNote   = 60.0;

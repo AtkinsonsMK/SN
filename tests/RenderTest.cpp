@@ -2,6 +2,7 @@
 // and its settings survive a save and reload (as FL Studio does with projects).
 #include "PluginProcessor.h"
 #include "Parameters.h"
+#include "Filters.h"
 #include <cmath>
 #include <iostream>
 
@@ -30,13 +31,13 @@ static juce::AudioBuffer<float> render (SNSynthProcessor& p, int note, int numBl
     return out;
 }
 
-static void setParam (SNSynthProcessor& p, const char* id, float value)
+static void setParam (SNSynthProcessor& p, const juce::String& id, float value)
 {
     auto* param = p.parameters.getParameter (id);
     param->setValueNotifyingHost (param->convertTo0to1 (value));
 }
 
-static float paramValue (SNSynthProcessor& p, const char* id)
+static float paramValue (SNSynthProcessor& p, const juce::String& id)
 {
     return p.parameters.getRawParameterValue (id)->load();
 }
@@ -238,6 +239,165 @@ int main()
             minF = std::min (minF, f); maxF = std::max (maxF, f);
         }
         check (minF > 437.0 && maxF < 443.0, "Drift stays within about 10 cents (" + juce::String (minF, 1) + " to " + juce::String (maxF, 1) + " Hz)");
+    }
+
+    // ---------------- Step 3: filter rack and EQ ----------------
+    auto sid = [] (int slot, const char* c) { return ParamIDs::slot (slot, c); };
+    auto setType = [&] (SNSynthProcessor& p, int slot, int type)
+    {
+        auto* param = p.parameters.getParameter (sid (slot, ParamIDs::slotType));
+        param->setValueNotifyingHost (param->convertTo0to1 ((float) type));
+    };
+    auto brightness = [] (const juce::AudioBuffer<float>& b, int start, int len)
+    {
+        double sum = 0; auto* d = b.getReadPointer (0);
+        for (int i = start + 1; i < start + len; ++i) sum += (d[i] - d[i - 1]) * (d[i] - d[i - 1]);
+        return (float) std::sqrt (sum / len);
+    };
+
+    {
+        auto p = makeSynth (sr);
+        const int total = (int) p->getParameters().size();
+        check (total == 38, "Synth has 38 controls (found " + juce::String (total) + ")");
+
+        bool ok = std::abs (paramValue (*p, sid (0, ParamIDs::slotType)) - FilterType::ota) < 0.01f
+               && std::abs (paramValue (*p, sid (1, ParamIDs::slotType)) - FilterType::off) < 0.01f
+               && std::abs (paramValue (*p, sid (2, ParamIDs::slotType)) - FilterType::off) < 0.01f
+               && std::abs (paramValue (*p, sid (0, ParamIDs::slotCutoff)) - 5000.0f) < 1.0f
+               && std::abs (paramValue (*p, sid (1, ParamIDs::slotCutoff)) - 2000.0f) < 1.0f
+               && std::abs (paramValue (*p, sid (0, ParamIDs::slotEnv)) - 40.0f) < 0.1f
+               && std::abs (paramValue (*p, sid (2, ParamIDs::slotResonance)) - 15.0f) < 0.1f
+               && std::abs (paramValue (*p, ParamIDs::eqMid)) < 0.01f;
+        check (ok, "Filter rack and EQ have the documented defaults (OTA / Off / Off)");
+    }
+
+    for (int type : { (int) FilterType::ota, (int) FilterType::sallenKey, (int) FilterType::lowpassGate })
+    {
+        const auto name = Params::filterTypeNames()[type];
+
+        // Low cutoff makes it darker than high cutoff.
+        float bright[2];
+        for (int k = 0; k < 2; ++k)
+        {
+            auto p = makeSynth (sr);
+            setType (*p, 0, type);
+            setParam (*p, sid (0, ParamIDs::slotEnv), 0);
+            setParam (*p, sid (0, ParamIDs::slotCutoff), k == 0 ? 300.0f : 8000.0f);
+            setParam (*p, sid (0, ParamIDs::slotCharacter), type == FilterType::lowpassGate ? 100.0f : 0.0f);
+            auto out = render (*p, 45, 40, false);
+            bright[k] = brightness (out, 2400, 4800);
+        }
+        check (bright[0] < bright[1] * 0.5f, name + ": Cutoff darkens the sound (" + juce::String (bright[0], 4) + " vs " + juce::String (bright[1], 4) + ")");
+
+        // Full resonance and drive, sweeping: stays stable (no blow-ups, no silence-killing NaN).
+        auto p = makeSynth (sr);
+        setType (*p, 0, type);
+        setParam (*p, sid (0, ParamIDs::slotResonance), 100);
+        setParam (*p, sid (0, ParamIDs::slotDrive), 100);
+        setParam (*p, sid (0, ParamIDs::slotEnv), 100);
+        setParam (*p, ParamIDs::lfoCutoff, 100);
+        setParam (*p, ParamIDs::lfoRate, 7);
+        auto out = render (*p, 33, 150, false);
+        bool finite = true;
+        for (int i = 0; i < out.getNumSamples(); ++i)
+            if (! std::isfinite (out.getSample (0, i))) { finite = false; break; }
+        const float peak = out.getMagnitude (0, 0, out.getNumSamples());
+        check (finite && peak < 1.5f && peak > 0.001f, name + ": stable at full Resonance and Drive (peak " + juce::String (peak, 3) + ")");
+    }
+
+    {
+        // Switching types keeps a similar loudness (within about 6 dB of OTA).
+        float levels[3];
+        int idx = 0;
+        for (int type : { (int) FilterType::ota, (int) FilterType::sallenKey, (int) FilterType::lowpassGate })
+        {
+            auto p = makeSynth (sr);
+            setType (*p, 0, type);
+            setParam (*p, sid (0, ParamIDs::slotCharacter), type == FilterType::lowpassGate ? 100.0f : 0.0f);
+            auto out = render (*p, 57, 40, false);
+            levels[idx++] = out.getRMSLevel (0, 2400, 4800);
+        }
+        bool ok = true;
+        for (float l : levels) ok = ok && std::abs (juce::Decibels::gainToDecibels (l / levels[0])) < 6.0f;
+        check (ok, "Switching filter type keeps similar loudness (OTA " + juce::String (levels[0], 3) + ", SK " + juce::String (levels[1], 3) + ", LPG " + juce::String (levels[2], 3) + ")");
+    }
+
+    {
+        // Lowpass Gate plucks: it dies away while the key is held, faster with short Gate Decay.
+        float tails[2];
+        for (int k = 0; k < 2; ++k)
+        {
+            auto p = makeSynth (sr);
+            setType (*p, 0, FilterType::lowpassGate);
+            setParam (*p, sid (0, ParamIDs::slotCharacter), k == 0 ? 0.0f : 60.0f);
+            auto out = render (*p, 57, 60, false);
+            tails[k] = out.getRMSLevel (0, 24000, 4800); // 0.5 s in, key still held
+        }
+        check (tails[0] < 0.002f && tails[1] > tails[0] * 5.0f, "Lowpass Gate plucks; Gate Decay lengthens it (" + juce::String (tails[0], 4) + " vs " + juce::String (tails[1], 4) + ")");
+    }
+
+    {
+        // Sallen-Key HP Cutoff thins out a low note.
+        float lv[2];
+        for (int k = 0; k < 2; ++k)
+        {
+            auto p = makeSynth (sr);
+            setType (*p, 0, FilterType::sallenKey);
+            setParam (*p, sid (0, ParamIDs::slotEnv), 0);
+            setParam (*p, sid (0, ParamIDs::slotCharacter), k == 0 ? 0.0f : 80.0f);
+            auto out = render (*p, 36, 40, false);
+            lv[k] = out.getRMSLevel (0, 2400, 9600);
+        }
+        check (lv[1] < lv[0] * 0.6f, "Sallen-Key HP Cutoff thins the low end (" + juce::String (lv[0], 3) + " to " + juce::String (lv[1], 3) + ")");
+    }
+
+    {
+        // Three slots in series: adding a dark second slot darkens the sound.
+        float b[2];
+        for (int k = 0; k < 2; ++k)
+        {
+            auto p = makeSynth (sr);
+            setParam (*p, sid (0, ParamIDs::slotEnv), 0);
+            if (k == 1) { setType (*p, 1, FilterType::sallenKey); setParam (*p, sid (1, ParamIDs::slotCutoff), 400.0f); }
+            auto out = render (*p, 45, 40, false);
+            b[k] = brightness (out, 2400, 4800);
+        }
+        check (b[1] < b[0] * 0.5f, "Slots run in series (second slot darkens: " + juce::String (b[0], 4) + " to " + juce::String (b[1], 4) + ")");
+    }
+
+    {
+        // Slot order is remembered when the project is saved and reloaded.
+        auto p = makeSynth (sr);
+        p->moveSlot (0, 1); // order becomes 1,0,2
+        p->moveSlot (1, 1); // order becomes 1,2,0
+        juce::MemoryBlock state;
+        p->getStateInformation (state);
+        auto q = makeSynth (sr);
+        q->setStateInformation (state.getData(), (int) state.getSize());
+        auto o = q->getSlotOrder();
+        check (o[0] == 1 && o[1] == 2 && o[2] == 0, "Filter slot order is saved and reloaded (" + juce::String (o[0] + 1) + ", " + juce::String (o[1] + 1) + ", " + juce::String (o[2] + 1) + ")");
+    }
+
+    {
+        // EQ: Low +12 dB makes a bass note louder; High -12 dB makes it darker.
+        auto ref = makeSynth (sr);
+        auto refOut = render (*ref, 33, 40, false);
+        auto p = makeSynth (sr);
+        setParam (*p, ParamIDs::eqLow, 12);
+        auto out = render (*p, 33, 40, false);
+        const float gain = out.getRMSLevel (0, 4800, 9600) / refOut.getRMSLevel (0, 4800, 9600);
+        check (gain > 1.5f, "EQ Low boosts the bass (x" + juce::String (gain, 2) + ")");
+
+        auto h = makeSynth (sr);
+        setParam (*h, ParamIDs::eqHigh, -12);
+        setParam (*h, sid (0, ParamIDs::slotCutoff), 20000.0f);
+        setParam (*ref, sid (0, ParamIDs::slotCutoff), 20000.0f);
+        auto hOut = render (*h, 57, 40, false);
+        auto r2 = makeSynth (sr);
+        setParam (*r2, sid (0, ParamIDs::slotCutoff), 20000.0f);
+        auto rOut = render (*r2, 57, 40, false);
+        const float bh = brightness (hOut, 4800, 9600), br = brightness (rOut, 4800, 9600);
+        check (bh < br * 0.8f, "EQ High cuts the treble (" + juce::String (br, 4) + " to " + juce::String (bh, 4) + ")");
     }
 
     std::cout << (failures == 0 ? "All checks passed" : juce::String (failures) + " check(s) failed") << std::endl;

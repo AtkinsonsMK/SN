@@ -39,9 +39,24 @@ public:
     juce::AudioProcessorValueTreeState parameters;
     juce::MidiKeyboardState keyboardState;
 
+    // Filter slot order (which slot runs first, second, third). Saved with the project.
+    std::array<int, 3> getSlotOrder() const;
+    void setSlotOrder (std::array<int, 3> order);
+    void moveSlot (int position, int delta); // swap the slot at position with its neighbour
+
 private:
     void updateVoiceSettings();
     void renderLfo (int numSamples);
+    void updateEq();
+    void applySlotOrderFromState();
+
+    struct SlotParams { std::atomic<float> *type, *cutoff, *res, *drive, *env, *character; };
+    std::array<SlotParams, 3> slotParams {};
+    std::array<std::atomic<int>, 3> slotOrder { 0, 1, 2 };
+
+    using EqFilter = juce::dsp::IIR::Filter<float>;
+    std::array<EqFilter, 2> eqLow, eqMid, eqHigh; // per channel
+    float lastEq[3] = { 1000.0f, 1000.0f, 1000.0f };
 
     juce::Synthesiser synth;
     VoiceSettings voiceSettings;
