@@ -82,6 +82,7 @@ namespace Vis
 
     private:
         bool filterEnv;
+        float attackStart = 0.0f; // the level the newest note's attack began from
     };
 
     // One LFO's shape (one cycle), with its current position.

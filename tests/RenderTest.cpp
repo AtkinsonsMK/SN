@@ -3,6 +3,7 @@
 #include "PluginProcessor.h"
 #include "Parameters.h"
 #include "Filters.h"
+#include "Envelope.h"
 #include "PluginEditor.h"
 #include <cmath>
 #include <iostream>
@@ -122,6 +123,40 @@ int main (int argc, char** argv)
 
     if (argc > 2 && juce::String (argv[1]) == "--snapshot")
         return saveSnapshot (juce::File (juce::String (argv[2])));
+
+    // Envelope display: the curve it draws (by time) and the dot (by level)
+    // must match the real envelope, including a release that starts mid-attack
+    // and an attack retriggered from a non-zero level.
+    {
+        Envelope e;
+        e.setSampleRate (sr);
+        const float A = 0.2f, D = 0.5f, S = 0.4f, R = 0.8f;
+        e.setParameters (A, D, S, R);
+        float worstTime = 0.0f, worstLevel = 0.0f;
+        auto run = [&] (int samples)
+        {
+            for (int i = 0; i < samples; ++i)
+            {
+                e.next();
+                const int st = e.stageIndex();
+                if (st != 1 && st != 2 && st != 4)
+                    continue;
+                const float knob = st == 1 ? A : st == 2 ? D : R;
+                const float start = st == 2 ? 1.0f : e.stageStartLevel();
+                const float total = Envelope::stageSeconds (st, knob, start, S);
+                const float fTime = total > 0.0f ? (float) e.secondsInStage() / total : 1.0f;
+                worstTime = juce::jmax (worstTime, std::abs (Envelope::curveLevel (st, fTime, start, S) - e.level()));
+                const float fLevel = Envelope::curveFraction (st, e.level(), start, S);
+                worstLevel = juce::jmax (worstLevel, std::abs (Envelope::curveLevel (st, fLevel, start, S) - e.level()));
+            }
+        };
+        e.noteOn();  run ((int) (sr * 1.2));   // attack, decay, sustain
+        e.noteOff(); run ((int) (sr * 0.3));   // part of the release
+        e.noteOn();  run ((int) (sr * 0.05));  // retrigger from mid-release, part of the attack
+        e.noteOff(); run ((int) (sr * 1.0));   // release from mid-attack
+        check (worstTime < 0.005f, "Envelope display curve matches the real envelope over time (worst " + juce::String (worstTime, 5) + ")");
+        check (worstLevel < 1.0e-4f, "Envelope dot sits on the curve at the real level (worst " + juce::String (worstLevel, 6) + ")");
+    }
 
     {
         SNSynthProcessor p;

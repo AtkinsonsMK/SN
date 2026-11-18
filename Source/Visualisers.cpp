@@ -1,6 +1,7 @@
 #include "Visualisers.h"
 #include "Parameters.h"
 #include "Filters.h"
+#include "Envelope.h"
 #include <complex>
 
 namespace Vis
@@ -251,53 +252,81 @@ void EnvelopeShape::paint (juce::Graphics& g)
     paintScreen (g);
     auto r = getLocalBounds().toFloat().reduced (6.0f, 5.0f);
 
+    // The newest note's envelope exactly as the sound has it (times and
+    // sustain after modulation, and the levels each stage started from).
+    // With no note playing, the knob settings.
+    const auto& env = filterEnv ? processor.live.filterEnv : processor.live.ampEnv;
+    const int   stage = processor.live.noteActive.load() ? env.stage.load() : 0;
+    const float level = env.level.load();
+    const float startLevel = env.startLevel.load();
+
     using namespace ParamIDs;
-    const float A = param (filterEnv ? fenvAttack : aenvAttack);
-    const float D = param (filterEnv ? fenvDecay : aenvDecay);
-    const float S = param (filterEnv ? fenvSustain : aenvSustain) * 0.01f;
-    const float R = param (filterEnv ? fenvRelease : aenvRelease);
+    float A = param (filterEnv ? fenvAttack : aenvAttack);
+    float D = param (filterEnv ? fenvDecay : aenvDecay);
+    float S = param (filterEnv ? fenvSustain : aenvSustain) * 0.01f;
+    float R = param (filterEnv ? fenvRelease : aenvRelease);
+    if (stage != 0)
+    {
+        A = env.attack.load(); D = env.decay.load(); S = env.sustain.load(); R = env.release.load();
+    }
 
-    // Segment widths follow the square root of each time, so short and long
-    // settings both stay readable; sustain gets a fixed quarter.
-    const float wa = std::sqrt (A), wd = std::sqrt (D), wr = std::sqrt (R);
-    const float scale = r.getWidth() * 0.75f / (wa + wd + wr);
+    // A retriggered note's attack starts from where the last one was; a
+    // release starts from wherever the note was when the key was let go.
+    if (stage == 0) attackStart = 0.0f;
+    if (stage == 1) attackStart = startLevel;
+    const float releaseStart = stage == 4 ? startLevel : S;
+
+    // How long each stage really lasts. Widths follow the square root of
+    // each time, so short and long settings both stay readable; sustain
+    // gets a fixed quarter.
+    const float tA = Envelope::stageSeconds (1, A, attackStart, S);
+    const float tD = Envelope::stageSeconds (2, D, 1.0f, S);
+    const float tR = Envelope::stageSeconds (4, R, releaseStart, S);
+    const float wa = std::sqrt (tA), wd = std::sqrt (tD), wr = std::sqrt (tR);
+    const float scale = r.getWidth() * 0.75f / juce::jmax (1.0e-4f, wa + wd + wr);
     const float xA = wa * scale, xD = wd * scale, xS = r.getWidth() * 0.25f, xR = wr * scale;
+    const float x0 = r.getX(), x1 = x0 + xA, x2 = x1 + xD, x3 = x2 + xS;
 
-    auto attackCurve  = [] (float t) { const float k = std::log (1.3f / 0.3f); return std::min (1.0f, 1.3f * (1.0f - std::exp (-t * k))); };
-    auto fallCurve    = [] (float t) { return std::exp (-t * 9.2f); };
+    auto yFor = [&] (float lvl) { return r.getBottom() - lvl * r.getHeight(); };
 
-    auto yFor = [&] (float level) { return r.getBottom() - level * r.getHeight(); };
-
+    // The line uses the same curve maths as the sound.
     juce::Path p;
-    p.startNewSubPath (r.getX(), yFor (0.0f));
-    const int steps = 40;
-    for (int i = 1; i <= steps; ++i) { const float t = (float) i / steps; p.lineTo (r.getX() + t * xA, yFor (attackCurve (t))); }
-    for (int i = 1; i <= steps; ++i) { const float t = (float) i / steps; p.lineTo (r.getX() + xA + t * xD, yFor (S + (1.0f - S) * fallCurve (t))); }
-    p.lineTo (r.getX() + xA + xD + xS, yFor (S));
-    for (int i = 1; i <= steps; ++i) { const float t = (float) i / steps; p.lineTo (r.getX() + xA + xD + xS + t * xR, yFor (S * fallCurve (t))); }
+    p.startNewSubPath (x0, yFor (0.0f));
+    p.lineTo (x0, yFor (attackStart));
+    auto segment = [&] (int st, float xStart, float width, float from)
+    {
+        const int steps = juce::jmax (8, (int) width);
+        for (int i = 1; i <= steps; ++i)
+        {
+            const float f = (float) i / (float) steps;
+            p.lineTo (xStart + f * width, yFor (Envelope::curveLevel (st, f, from, S)));
+        }
+    };
+    segment (1, x0, xA, attackStart);
+    segment (2, x1, xD, 1.0f);
+    p.lineTo (x3, yFor (S));
+    p.lineTo (x3, yFor (releaseStart));
+    segment (4, x3, xR, releaseStart);
 
     g.setColour (Colours::trace);
     g.strokePath (p, juce::PathStrokeType (1.6f));
 
-    // Where the newest note is.
-    auto& live = processor.live;
-    const int stage = filterEnv ? live.filterEnvStage.load() : live.ampEnvStage.load();
-    if (! live.noteActive.load() || stage == 0)
+    if (stage == 0)
         return;
 
-    const float secs  = filterEnv ? live.filterEnvSeconds.load() : live.ampEnvSeconds.load();
-    const float level = filterEnv ? live.filterEnvLevel.load()   : live.ampEnvLevel.load();
-    float x = r.getX();
+    // The dot: placed by the real level, so its height is exactly what the
+    // sound is doing and it always sits on the line.
+    float x = x0, y = yFor (level);
     switch (stage)
     {
-        case 1: x += xA * juce::jlimit (0.0f, 1.0f, secs / std::max (A, 1.0e-4f)); break;
-        case 2: x += xA + xD * juce::jlimit (0.0f, 1.0f, secs / std::max (D, 1.0e-4f)); break;
-        case 3: x += xA + xD + xS * 0.5f; break;
-        case 4: x += xA + xD + xS + xR * juce::jlimit (0.0f, 1.0f, secs / std::max (R, 1.0e-4f)); break;
+        case 1: { const float f = Envelope::curveFraction (1, level, attackStart, S);  x = x0 + xA * f; y = yFor (Envelope::curveLevel (1, f, attackStart, S)); break; }
+        case 2: { const float f = Envelope::curveFraction (2, level, 1.0f, S);         x = x1 + xD * f; y = yFor (Envelope::curveLevel (2, f, 1.0f, S)); break; }
+        case 3:   x = x2 + xS * 0.5f; y = yFor (S); break;
+        case 4: { const float f = Envelope::curveFraction (4, level, releaseStart, S); x = x3 + xR * f; y = yFor (Envelope::curveLevel (4, f, releaseStart, S)); break; }
         default: break;
     }
     g.setColour (Theme::accent);
-    g.fillEllipse (x - 3.5f, yFor (level) - 3.5f, 7.0f, 7.0f);
+    g.fillEllipse (x - 3.5f, y - 3.5f, 7.0f, 7.0f);
 }
 
 //==============================================================================

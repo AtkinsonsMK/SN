@@ -406,12 +406,18 @@ private:
             live->liveCutoffHz[s].store (lastCutoffHz[s]);
             live->gateLevel[s].store (shared.slots[s].type == FilterType::lowpassGate ? filters[s].gate() : 1.0f);
         }
-        live->filterEnvStage.store (filterEnv.stageIndex());
-        live->filterEnvSeconds.store ((float) filterEnv.secondsInStage());
-        live->filterEnvLevel.store (filterEnv.level());
-        live->ampEnvStage.store (ampEnv.stageIndex());
-        live->ampEnvSeconds.store ((float) ampEnv.secondsInStage());
-        live->ampEnvLevel.store (ampEnv.level());
+        auto publish = [] (LiveInfo::EnvState& out, const Envelope& e, float a, float d, float r)
+        {
+            out.attack.store (a);
+            out.decay.store (d);
+            out.release.store (r);
+            out.sustain.store (e.sustainLevel());
+            out.startLevel.store (e.stageStartLevel());
+            out.level.store (e.level());
+            out.stage.store (e.stageIndex());
+        };
+        publish (live->filterEnv, filterEnv, cur.fenvA, cur.fenvD, cur.fenvR);
+        publish (live->ampEnv, ampEnv, cur.aenvA, cur.aenvD, cur.aenvR);
     }
 
     void applyEnvelopeSettings()

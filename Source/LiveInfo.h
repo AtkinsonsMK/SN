@@ -13,9 +13,16 @@ struct LiveInfo
     std::atomic<bool>  noteActive { false };
     std::atomic<float> liveCutoffHz[3] { 0.0f, 0.0f, 0.0f };
     std::atomic<float> gateLevel[3] { 1.0f, 1.0f, 1.0f };
-    std::atomic<int>   filterEnvStage { 0 }, ampEnvStage { 0 };
-    std::atomic<float> filterEnvSeconds { 0.0f }, ampEnvSeconds { 0.0f };
-    std::atomic<float> filterEnvLevel { 0.0f }, ampEnvLevel { 0.0f };
+    // Each envelope of the newest note, exactly as the sound has it: its
+    // stage (0 idle, 1 attack, 2 decay, 3 sustain, 4 release), its level, the
+    // level the stage started from, and its knob values after modulation.
+    struct EnvState
+    {
+        std::atomic<int>   stage { 0 };
+        std::atomic<float> level { 0.0f }, startLevel { 0.0f };
+        std::atomic<float> attack { 0.001f }, decay { 0.3f }, sustain { 1.0f }, release { 0.2f };
+    };
+    EnvState filterEnv, ampEnv;
     std::atomic<float> lfoPhase { 0.0f }, lfo2Phase { 0.0f };
     std::atomic<bool>  limiting { false }; // the Output Limiter turned something down (the screen clears it)
 
