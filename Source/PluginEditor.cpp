@@ -178,6 +178,7 @@ SNSynthEditor::SNSynthEditor (SNSynthProcessor& p)
         content.addAndMakeVisible (b);
     }
     content.addAndMakeVisible (modList);
+    content.addAndMakeVisible (chainStrip);
 
     heldNotes.fill (-1);
     setWantsKeyboardFocus (true);
@@ -233,12 +234,6 @@ void SNSynthEditor::setupSlot (SlotPanel& sp, int slotIndex)
     sp.characterKnob = &makeKnob (slot (slotIndex, slotCharacter), "Type Knob");
     sp.group.knobs.push_back (sp.characterKnob);
 
-    for (auto* b : { &sp.moveLeft, &sp.moveRight })
-    {
-        b->setWantsKeyboardFocus (false);
-        b->setColour (juce::TextButton::buttonColourId, background);
-        content.addAndMakeVisible (*b);
-    }
     sp.levelMatch.setWantsKeyboardFocus (false);
     sp.levelMatch.setColour (juce::ToggleButton::textColourId, dimText);
     sp.levelMatch.setColour (juce::ToggleButton::tickColourId, accent);
@@ -247,21 +242,6 @@ void SNSynthEditor::setupSlot (SlotPanel& sp, int slotIndex)
     content.addAndMakeVisible (sp.levelMatch);
     sp.levelMatchAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (
         processor.parameters, slot (slotIndex, slotLevelMatch), sp.levelMatch);
-
-    sp.moveLeft.setTooltip ("Move this filter earlier in the chain");
-    sp.moveRight.setTooltip ("Move this filter later in the chain");
-    sp.moveLeft.onClick = [this, slotIndex]
-    {
-        auto order = processor.getSlotOrder();
-        const int pos = (int) (std::find (order.begin(), order.end(), slotIndex) - order.begin());
-        processor.moveSlot (pos, -1);
-    };
-    sp.moveRight.onClick = [this, slotIndex]
-    {
-        auto order = processor.getSlotOrder();
-        const int pos = (int) (std::find (order.begin(), order.end(), slotIndex) - order.begin());
-        processor.moveSlot (pos, +1);
-    };
 
     updateSlotTypeDisplay (sp);
 }
@@ -365,11 +345,7 @@ void SNSynthEditor::timerCallback()
     for (auto& sp : slots)
         updateSlotTypeDisplay (sp);
 
-    if (processor.getSlotOrder() != shownOrder)
-    {
-        resized();
-        repaint();
-    }
+    chainStrip.repaint();
 }
 
 Knob& SNSynthEditor::makeKnob (const juce::String& paramId, const juce::String& labelText)
@@ -557,18 +533,6 @@ void SNSynthEditor::paintContent (juce::Graphics& g)
         g.drawText (group->title.toUpperCase(), group->bounds.reduced (10, 6).removeFromTop (16),
                     juce::Justification::centredLeft);
     }
-
-    // Arrows between the filter slots show the order sound flows through them.
-    g.setColour (accent);
-    for (int pos = 0; pos < 2; ++pos)
-    {
-        const auto a = slots[(size_t) shownOrder[(size_t) pos]].group.bounds;
-        const auto b = slots[(size_t) shownOrder[(size_t) pos + 1]].group.bounds;
-        const float y = (float) a.getCentreY();
-        juce::Path arrow;
-        arrow.addArrow ({ (float) a.getRight() + 1.0f, y, (float) b.getX() - 1.0f, y }, 2.0f, 7.0f, 5.0f);
-        g.fillPath (arrow);
-    }
 }
 
 void SNSynthEditor::resized()
@@ -613,29 +577,24 @@ void SNSynthEditor::layoutContent()
     layoutGroup (filterEnvGroup, row2a.removeFromLeft (unit * 4)); row2a.removeFromLeft (gap);
     layoutGroup (ampEnvGroup,    row2a);
 
-    // Row 3: the filter rack, slots drawn in processing order
+    // The chain: drag blocks to change the processing order.
+    area.removeFromTop (gap);
+    chainStrip.setBounds (area.removeFromTop (34));
+
+    // Row 3: the three filter slots
     area.removeFromTop (gap);
     auto row2 = area.removeFromTop (rowH + 26);
-    const int slotW = (row2.getWidth() - 2 * 14) / 3;
-    shownOrder = processor.getSlotOrder();
-    for (int pos = 0; pos < 3; ++pos)
+    const int slotW = (row2.getWidth() - 2 * gap) / 3;
+    for (int i = 0; i < 3; ++i)
     {
-        auto& sp = slots[(size_t) shownOrder[(size_t) pos]];
+        auto& sp = slots[(size_t) i];
         auto b = row2.removeFromLeft (slotW);
-        if (pos < 2) row2.removeFromLeft (14);
+        if (i < 2) row2.removeFromLeft (gap);
 
         layoutGroup (sp.group, b, 26);
         auto header = b.reduced (8, 6).removeFromTop (20);
-        header.removeFromLeft (70);
-        sp.moveRight.setBounds (header.removeFromRight (22));
-        header.removeFromRight (4);
-        sp.moveLeft.setBounds (header.removeFromRight (22));
-        header.removeFromRight (8);
         sp.levelMatch.setBounds (header.removeFromRight (70));
         sp.type.setBounds (header.withY (header.getY() + 22).withHeight (22).withX (b.getX() + 8).withWidth (b.getWidth() - 16));
-
-        sp.moveLeft.setEnabled (pos > 0);
-        sp.moveRight.setEnabled (pos < 2);
     }
 
     // Row 4: LFOs, EQ, output (Volume, meter, switches), modulation list
@@ -903,5 +862,126 @@ void ModList::mouseUp (const juce::MouseEvent& e)
 void ModList::mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails& w)
 {
     scroll = juce::jlimit (0, juce::jmax (0, (int) rows.size() - getHeight() / rowH), scroll + (w.deltaY < 0 ? 1 : -1));
+    repaint();
+}
+
+//==============================================================================
+// Chain strip
+namespace
+{
+    constexpr float chainEndW = 110.0f, chainArrowW = 26.0f;
+}
+
+juce::Rectangle<float> ChainStrip::blockBounds (int position) const
+{
+    auto r = getLocalBounds().toFloat();
+    const float inner = r.getWidth() - 2.0f * chainEndW - 6.0f * chainArrowW;
+    const float w = inner / (float) Chain::numBlocks;
+    return { r.getX() + chainEndW + chainArrowW + (float) position * (w + chainArrowW), r.getY() + 3.0f, w, r.getHeight() - 6.0f };
+}
+
+int ChainStrip::positionAt (float x) const
+{
+    int best = 0;
+    float bestDist = 1.0e9f;
+    for (int p = 0; p < Chain::numBlocks; ++p)
+    {
+        const float d = std::abs (blockBounds (p).getCentreX() - x);
+        if (d < bestDist) { bestDist = d; best = p; }
+    }
+    return best;
+}
+
+void ChainStrip::paint (juce::Graphics& g)
+{
+    const auto order = processor.getChainOrder();
+    auto r = getLocalBounds().toFloat();
+    const auto& typeNames = Params::filterTypeNames();
+
+    g.setColour (panel);
+    g.fillRoundedRectangle (r, 8.0f);
+
+    auto endBox = [&] (juce::Rectangle<float> b, const juce::String& t)
+    {
+        g.setColour (dimText);
+        g.setFont (juce::FontOptions (12.0f, juce::Font::bold));
+        g.drawText (t, b, juce::Justification::centred);
+    };
+    endBox (r.withWidth (chainEndW), "OSCILLATORS");
+    endBox (r.withLeft (r.getRight() - chainEndW), "VOLUME");
+
+    for (int pos = 0; pos <= Chain::numBlocks; ++pos)
+    {
+        const float x1 = pos < Chain::numBlocks ? blockBounds (pos).getX() : r.getRight() - chainEndW;
+        juce::Path a;
+        a.addArrow ({ x1 - chainArrowW + 4.0f, r.getCentreY(), x1 - 4.0f, r.getCentreY() }, 1.5f, 7.0f, 6.0f);
+        g.setColour (accent);
+        g.fillPath (a);
+    }
+
+    for (int pos = 0; pos < Chain::numBlocks; ++pos)
+    {
+        const int b = order[(size_t) pos];
+        auto box = blockBounds (pos);
+        if (pos == dragFrom)
+            box = box.withX (juce::jlimit (blockBounds (0).getX(), blockBounds (Chain::numBlocks - 1).getX(), dragX - box.getWidth() * 0.5f));
+
+        juce::String label = Chain::blockName (b);
+        bool off = false;
+        if (Chain::isFilter (b))
+        {
+            const int type = (int) processor.parameters.getRawParameterValue (ParamIDs::slot (b, ParamIDs::slotType))->load();
+            label << "  " << typeNames[type];
+            off = type == FilterType::off;
+        }
+
+        g.setColour (pos == dragFrom ? accent.withAlpha (0.25f) : background);
+        g.fillRoundedRectangle (box, 5.0f);
+        g.setColour (pos == dragFrom ? accent : juce::Colour (0xff3a3e47));
+        g.drawRoundedRectangle (box, 5.0f, 1.0f);
+        g.setColour (off ? dimText : text);
+        g.setFont (juce::FontOptions (13.0f));
+        g.drawText (label, box.reduced (8.0f, 0.0f), juce::Justification::centred, true);
+    }
+
+    if (dragFrom >= 0 && dropAt >= 0 && dropAt != dragFrom)
+    {
+        g.setColour (accent);
+        g.drawRoundedRectangle (blockBounds (dropAt).reduced (1.0f), 5.0f, 2.0f);
+    }
+}
+
+void ChainStrip::mouseMove (const juce::MouseEvent& e)
+{
+    bool onBlock = false;
+    for (int p = 0; p < Chain::numBlocks; ++p)
+        onBlock = onBlock || blockBounds (p).contains (e.position);
+    setMouseCursor (onBlock ? juce::MouseCursor::DraggingHandCursor : juce::MouseCursor::NormalCursor);
+}
+
+void ChainStrip::mouseDown (const juce::MouseEvent& e)
+{
+    dragFrom = -1;
+    for (int p = 0; p < Chain::numBlocks; ++p)
+        if (blockBounds (p).contains (e.position))
+            dragFrom = p;
+    dragX = e.position.x;
+    dropAt = dragFrom;
+    repaint();
+}
+
+void ChainStrip::mouseDrag (const juce::MouseEvent& e)
+{
+    if (dragFrom < 0) return;
+    dragX = e.position.x;
+    dropAt = positionAt (dragX);
+    repaint();
+}
+
+void ChainStrip::mouseUp (const juce::MouseEvent&)
+{
+    if (dragFrom >= 0 && dropAt >= 0 && dropAt != dragFrom)
+        processor.moveBlock (dragFrom, dropAt);
+    dragFrom = dropAt = -1;
     repaint();
 }

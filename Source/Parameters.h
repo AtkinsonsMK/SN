@@ -93,7 +93,22 @@ namespace ParamIDs
 // Non-automatable settings stored with the project / preset.
 namespace StateIDs
 {
-    inline constexpr const char* slotOrder = "slotOrder"; // e.g. "0,1,2"
+    inline constexpr const char* slotOrder  = "slotOrder";  // filters only, e.g. "0,1,2" (older versions)
+    inline constexpr const char* chainOrder = "chainOrder"; // whole chain, e.g. "0,1,2,3,4"
+}
+
+// The processing chain after the oscillators: three filter slots, the Amp
+// (the amp envelope's volume) and the EQ, in any order. Volume is always last.
+namespace Chain
+{
+    enum Block { filter1 = 0, filter2 = 1, filter3 = 2, amp = 3, eq = 4, numBlocks = 5 };
+    constexpr bool isFilter (int b) { return b >= filter1 && b <= filter3; }
+    inline std::array<int, numBlocks> defaultOrder() { return { 0, 1, 2, 3, 4 }; }
+    inline juce::String blockName (int b)
+    {
+        if (isFilter (b)) return "Filter " + juce::String (b + 1);
+        return b == amp ? "Amp" : "EQ";
+    }
 }
 
 namespace Params

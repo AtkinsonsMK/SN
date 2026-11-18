@@ -45,7 +45,12 @@ public:
     Mod::Matrix modMatrix;
     static float lfoShapeValue (int shape, double phase, float randomValue);
 
-    // Filter slot order (which slot runs first, second, third). Saved with the project.
+    // Processing order of Filters 1-3, Amp and EQ. Saved with the project.
+    std::array<int, Chain::numBlocks> getChainOrder() const;
+    void setChainOrder (std::array<int, Chain::numBlocks> order);
+    void moveBlock (int position, int newPosition); // take the block at position and put it at newPosition
+
+    // Just the filters, in the order they run.
     std::array<int, 3> getSlotOrder() const;
     void setSlotOrder (std::array<int, 3> order);
     void moveSlot (int position, int delta); // swap the slot at position with its neighbour
@@ -53,17 +58,13 @@ public:
 private:
     void updateVoiceSettings();
     void renderLfo (int numSamples);
-    void updateEq (const float* gainsDb);
-    void globalModValues (int pos, float* eqDb, float& volDb);
+    float globalVolumeDb (int pos);
     void applySlotOrderFromState();
 
     struct SlotParams { std::atomic<float> *type, *cutoff, *res, *drive, *env, *character; };
     std::array<SlotParams, 3> slotParams {};
-    std::array<std::atomic<int>, 3> slotOrder { 0, 1, 2 };
+    std::array<std::atomic<int>, Chain::numBlocks> chainOrder { 0, 1, 2, 3, 4 };
 
-    using EqFilter = juce::dsp::IIR::Filter<float>;
-    std::array<EqFilter, 2> eqLow, eqMid, eqHigh; // per channel
-    float lastEq[3] = { 1000.0f, 1000.0f, 1000.0f };
 
     VoiceSettings voiceSettings;
     SynthEngine synth { voiceSettings };
@@ -78,7 +79,7 @@ private:
     juce::SmoothedValue<float> voiceComp { 1.0f };
     float limiterEnv = 0.0f, limiterRelease = 0.9999f;
     static constexpr float limiterCeiling = 0.966f; // -0.3 dB
-    std::array<std::vector<float>, 5> tapBuffers; // osc, 3 filter positions, after EQ
+    std::array<std::vector<float>, 1 + Chain::numBlocks> tapBuffers; // oscillators, then after each chain position
     double currentSampleRate = 44100.0;
 
     std::atomic<float>* volumeParam = nullptr;

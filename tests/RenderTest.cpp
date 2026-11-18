@@ -106,7 +106,7 @@ static int saveSnapshot (const juce::File& file)
 
     // And the Numbers view.
     Vis::Numbers numbers (*p);
-    numbers.setSize (820, 500);
+    numbers.setSize (960, 500);
     numbers.capture();
     auto img2 = numbers.createComponentSnapshot (numbers.getLocalBounds(), true, 2.0f);
     juce::FileOutputStream out2 (file.getSiblingFile (file.getFileNameWithoutExtension() + "-numbers.png"));
@@ -846,6 +846,63 @@ int main (int argc, char** argv)
         auto b = render (*q, 69, 60, false);
         check (std::abs (measureFreq (a, 9600, 12000, sr) - 440.0) < 4.0 && std::abs (measureFreq (b, 9600, 12000, sr) - 440.0) < 4.0,
                "Oversampling 1x and 4x both play in tune");
+    }
+
+
+    //==========================================================================
+    // Reorderable chain
+    {
+        auto p = makeSynth (sr);
+        const auto d = p->getChainOrder();
+        check (d == Chain::defaultOrder(), "Chain starts as Filter 1, 2, 3, Amp, EQ");
+
+        p->moveBlock (3, 0); // Amp to the front
+        p->moveBlock (4, 1); // EQ second
+        juce::MemoryBlock state;
+        p->getStateInformation (state);
+        SNSynthProcessor q;
+        q.setStateInformation (state.getData(), (int) state.getSize());
+        const auto o = q.getChainOrder();
+        check (o == std::array<int, 5> { 3, 4, 0, 1, 2 }, "Chain order is saved and reloaded (Amp, EQ, Filter 1, 2, 3)");
+
+        // A project from before the chain: only the filter order was saved.
+        auto tree = p->parameters.copyState();
+        tree.removeProperty (StateIDs::chainOrder, nullptr);
+        tree.setProperty (StateIDs::slotOrder, "2,0,1", nullptr);
+        juce::MemoryBlock old;
+        if (auto xml = tree.createXml()) juce::AudioProcessor::copyXmlToBinary (*xml, old);
+        SNSynthProcessor r;
+        r.setStateInformation (old.getData(), (int) old.getSize());
+        check (r.getChainOrder() == std::array<int, 5> { 2, 0, 1, 3, 4 }, "Older projects keep their filter order, with Amp and EQ after");
+    }
+    {
+        // Amp before a driven filter: quieter parts of the envelope drive the
+        // filter less, so the tone changes, not just the level.
+        auto measure = [&] (bool ampFirst)
+        {
+            auto p = makeSynth (sr);
+            setParam (*p, ParamIDs::drift, 0);
+            setParam (*p, ParamIDs::slot (0, ParamIDs::slotDrive), 100);
+            setParam (*p, ParamIDs::slot (0, ParamIDs::slotEnv), 0);
+            setParam (*p, ParamIDs::aenvSustain, 15);
+            if (ampFirst) p->moveBlock (3, 0);
+            auto out = render (*p, 45, 60, false);
+            return brightness (out, 14400, 9600) / juce::jmax (1.0e-6f, out.getRMSLevel (0, 14400, 9600));
+        };
+        const float last = measure (false), first = measure (true);
+        check (std::abs (first - last) / last > 0.1f,
+               "Moving Amp before a driven filter changes the tone (" + juce::String (last, 3) + " vs " + juce::String (first, 3) + ")");
+    }
+    {
+        // EQ placed first still works.
+        auto ref = makeSynth (sr);
+        auto a = render (*ref, 33, 40, false);
+        auto p = makeSynth (sr);
+        p->moveBlock (4, 0);
+        setParam (*p, ParamIDs::eqLow, 12);
+        auto b = render (*p, 33, 40, false);
+        const float gain = b.getRMSLevel (0, 4800, 9600) / a.getRMSLevel (0, 4800, 9600);
+        check (gain > 1.3f, "EQ moved to the front still boosts the bass (x" + juce::String (gain, 2) + ")");
     }
 
     std::cout << (failures == 0 ? "All checks passed" : juce::String (failures) + " check(s) failed") << std::endl;

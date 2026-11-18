@@ -381,7 +381,7 @@ Numbers::Numbers (SNSynthProcessor& p) : processor (p)
     freeze.setWantsKeyboardFocus (false);
     grab.setWantsKeyboardFocus (false);
     grab.onClick = [this] { capture(); repaint(); };
-    setSize (820, 500);
+    setSize (960, 500);
     startTimerHz (2);
 }
 
@@ -428,18 +428,19 @@ void Numbers::paint (juce::Graphics& g)
                 header, juce::Justification::centredLeft);
     area.removeFromTop (8);
 
-    // Column titles follow the current filter order.
-    const auto order = processor.getSlotOrder();
+    // Column titles follow the current chain order.
+    const auto order = processor.getChainOrder();
     const auto& typeNames = Params::filterTypeNames();
-    stageNames[0] = "Oscillator";
-    for (int pos = 0; pos < 3; ++pos)
+    stageNames[0] = "Oscillators";
+    for (int pos = 0; pos < Chain::numBlocks; ++pos)
     {
-        const int slot = order[(size_t) pos];
-        const int type = (int) processor.parameters.getRawParameterValue (ParamIDs::slot (slot, ParamIDs::slotType))->load();
-        stageNames[pos + 1] = "Filter " + juce::String (slot + 1) + " (" + typeNames[type] + ")";
+        const int b = order[(size_t) pos];
+        juce::String name = Chain::blockName (b);
+        if (Chain::isFilter (b))
+            name << " (" << typeNames[(int) processor.parameters.getRawParameterValue (ParamIDs::slot (b, ParamIDs::slotType))->load()] << ")";
+        stageNames[pos + 1] = name;
     }
-    stageNames[4] = "After EQ";
-    stageNames[5] = "Output";
+    stageNames[LiveInfo::numStages - 1] = "Output";
 
     const int labelW = 26;
     const int colW = (area.getWidth() - labelW) / LiveInfo::numStages;

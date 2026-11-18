@@ -41,6 +41,26 @@ struct Knob
     std::unique_ptr<ModRing> ring; // only for knobs that can be modulated
 };
 
+// The processing order: Oscillators -> five movable blocks -> Volume.
+// Drag a block left or right to change where it runs.
+class ChainStrip : public juce::Component
+{
+public:
+    explicit ChainStrip (SNSynthProcessor& p) : processor (p) { setWantsKeyboardFocus (false); }
+    void paint (juce::Graphics&) override;
+    void mouseDown (const juce::MouseEvent&) override;
+    void mouseDrag (const juce::MouseEvent&) override;
+    void mouseUp (const juce::MouseEvent&) override;
+    void mouseMove (const juce::MouseEvent&) override;
+
+private:
+    juce::Rectangle<float> blockBounds (int position) const;
+    int positionAt (float x) const;
+    SNSynthProcessor& processor;
+    int dragFrom = -1, dropAt = -1;
+    float dragX = 0.0f;
+};
+
 // The list of every active routing, with a remove button on each.
 class ModList : public juce::Component
 {
@@ -74,7 +94,6 @@ struct SlotPanel
     int slotIndex = 0;
     juce::ComboBox type;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> typeAttachment;
-    juce::TextButton moveLeft { "<" }, moveRight { ">" };
     juce::ToggleButton levelMatch { "Match" };
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> levelMatchAttachment;
     KnobGroup group;
@@ -94,7 +113,7 @@ public:
     void resized() override;
 
     // The panel is laid out at this size and scaled to the window.
-    static constexpr int baseW = 1200, baseH = 1000;
+    static constexpr int baseW = 1200, baseH = 1040;
 
     SNSynthProcessor& getProcessor() { return processor; }
     int getSelectedSource() const { return modSource; }
@@ -135,7 +154,7 @@ private:
     std::vector<std::unique_ptr<Knob>> knobs;
     KnobGroup oscGroup, osc2Group, mixGroup, playGroup, filterEnvGroup, ampEnvGroup, lfo1Group, lfo2Group, eqGroup, outputGroup;
     std::array<SlotPanel, 3> slots;
-    std::array<int, 3> shownOrder { -1, -1, -1 };
+    ChainStrip chainStrip { processor };
 
     Vis::Scope scope1, scope2, scopeMix;
     Vis::EnvelopeShape filterEnvShape, ampEnvShape;

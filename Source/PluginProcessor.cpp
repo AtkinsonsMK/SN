@@ -14,7 +14,7 @@ SNSynthProcessor::SNSynthProcessor()
         slotParams[(size_t) i] = { get (ParamIDs::slotType), get (ParamIDs::slotCutoff), get (ParamIDs::slotResonance),
                                    get (ParamIDs::slotDrive), get (ParamIDs::slotEnv), get (ParamIDs::slotCharacter) };
     }
-    parameters.state.setProperty (StateIDs::slotOrder, "0,1,2", nullptr);
+    setChainOrder (Chain::defaultOrder());
 
     for (int t = 0; t < Mod::numTargets; ++t)
     {
@@ -50,13 +50,7 @@ void SNSynthProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     synth.setCurrentPlaybackSampleRate (sampleRate);
     keyboardState.reset();
 
-    juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) juce::jmax (samplesPerBlock, 1), 1 };
-    for (auto* bank : { &eqLow, &eqMid, &eqHigh })
-        for (auto& f : *bank) { f.prepare (spec); f.reset(); }
-    lastEq[0] = lastEq[1] = lastEq[2] = 1000.0f; // force coefficient update
     updateVoiceSettings();
-    const float flat[3] = { modContext.baseReal[Mod::eqLow], modContext.baseReal[Mod::eqMid], modContext.baseReal[Mod::eqHigh] };
-    updateEq (flat);
 
     outputGain.reset (sampleRate, 0.02);
     outputGain.setCurrentAndTargetValue (volumeDbToGain (volumeParam->load()));
@@ -85,8 +79,7 @@ void SNSynthProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
         if ((int) tapBuffers[t].size() < n)
             tapBuffers[t].resize ((size_t) n); // only if the host exceeds its announced block size
         std::fill (tapBuffers[t].begin(), tapBuffers[t].begin() + n, 0.0f);
-        if (t < 4)
-            voiceSettings.taps[t] = tapBuffers[t].data();
+        voiceSettings.taps[t] = tapBuffers[t].data();
     }
 
     // Mod wheel (MIDI CC 1)
@@ -110,25 +103,13 @@ void SNSynthProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
         voiceComp.setTargetValue (comp ? 1.0f / std::sqrt ((float) juce::jmax (1, playing)) : 1.0f);
     }
 
-    // EQ, Volume and the limiter run in short chunks so EQ and Volume can
-    // follow their modulation.
+    // Volume and the limiter run in short chunks so Volume can follow its modulation.
     const bool limiterOn = p (ParamIDs::limiter)->load() > 0.5f;
     for (int start = 0; start < numSamples; start += globalModInterval)
     {
         const int len = juce::jmin (globalModInterval, numSamples - start);
 
-        float eqDb[3], volDb;
-        globalModValues (start, eqDb, volDb);
-
-        updateEq (eqDb);
-        for (int ch = 0; ch < juce::jmin (2, numChannels); ++ch)
-        {
-            auto* d = buffer.getWritePointer (ch, start);
-            for (int i = 0; i < len; ++i)
-                d[i] = eqHigh[(size_t) ch].processSample (eqMid[(size_t) ch].processSample (eqLow[(size_t) ch].processSample (d[i])));
-        }
-        if (numChannels > 0)
-            std::copy (buffer.getReadPointer (0, start), buffer.getReadPointer (0, start) + len, tapBuffers[4].begin() + start);
+        const float volDb = globalVolumeDb (start);
 
         outputGain.setTargetValue (volumeDbToGain (volDb));
         for (int i = start; i < start + len; ++i)
@@ -203,9 +184,9 @@ void SNSynthProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
     for (int i = 0; i < numSamples; ++i)
     {
         auto& f = live.ring[(size_t) (w & (LiveInfo::ringSize - 1))];
-        for (size_t t = 0; t < 5; ++t)
+        for (size_t t = 0; t < tapBuffers.size(); ++t)
             f.v[t] = tapBuffers[t][(size_t) i];
-        f.v[5] = out != nullptr ? out[i] : 0.0f;
+        f.v[LiveInfo::numStages - 1] = out != nullptr ? out[i] : 0.0f;
         ++w;
     }
     live.writePos.store (w & 0x3fffffff, std::memory_order_release);
@@ -255,17 +236,19 @@ void SNSynthProcessor::updateVoiceSettings()
         slot.type       = (int) slotParams[i].type->load();
         slot.levelMatch = parameters.getRawParameterValue (ParamIDs::slot ((int) i, ParamIDs::slotLevelMatch))->load() > 0.5f;
         slot.oversample = os;
-        v.order[i] = slotOrder[i].load();
     }
+
+    for (size_t i = 0; i < (size_t) Chain::numBlocks; ++i)
+        v.order[i] = chainOrder[i].load();
 
     synth.setVoiceLimit ((int) p (ParamIDs::voices)->load());
 }
 
-// EQ and Volume, with their modulation, at sample `pos` of this block.
-void SNSynthProcessor::globalModValues (int pos, float* eqDb, float& volDb)
+// Volume, with its modulation, at sample `pos` of this block.
+float SNSynthProcessor::globalVolumeDb (int pos)
 {
     auto& m = modContext;
-    float offset[4] {};
+    float offset = 0.0f;
     if (m.numRoutes > 0)
     {
         float src[Mod::numSources];
@@ -276,63 +259,75 @@ void SNSynthProcessor::globalModValues (int pos, float* eqDb, float& volDb)
         src[Mod::modWheel] = m.modWheel;
 
         for (int r = 0; r < m.numRoutes; ++r)
-        {
-            const auto& route = m.routes[(size_t) r];
-            if (Mod::isGlobal (route.target))
-                offset[route.target - Mod::eqLow] += src[route.source] * route.amount;
-        }
+            if (m.routes[(size_t) r].target == Mod::volume)
+                offset += src[m.routes[(size_t) r].source] * m.routes[(size_t) r].amount;
     }
-    for (int b = 0; b < 3; ++b)
-        eqDb[b] = std::abs (offset[b]) > 1.0e-7f ? Mod::applyOffset (m, Mod::eqLow + b, offset[b]) : m.baseReal[(size_t) (Mod::eqLow + b)];
-    volDb = std::abs (offset[3]) > 1.0e-7f ? Mod::applyOffset (m, Mod::volume, offset[3]) : m.baseReal[(size_t) Mod::volume];
+    return std::abs (offset) > 1.0e-7f ? Mod::applyOffset (m, Mod::volume, offset) : m.baseReal[(size_t) Mod::volume];
 }
 
-void SNSynthProcessor::updateEq (const float* gains)
+std::array<int, Chain::numBlocks> SNSynthProcessor::getChainOrder() const
 {
-    using C = juce::dsp::IIR::ArrayCoefficients<float>;
-    const auto sr = currentSampleRate;
+    std::array<int, Chain::numBlocks> o {};
+    for (size_t i = 0; i < o.size(); ++i)
+        o[i] = chainOrder[i].load();
+    return o;
+}
 
-    // Only recalculate a band when its gain has moved (no memory is
-    // allocated here, so this is safe to do while modulating).
-    if (std::abs (gains[0] - lastEq[0]) > 0.01f)
-    {
-        const auto c = C::makeLowShelf (sr, 100.0, 0.707f, juce::Decibels::decibelsToGain (gains[0]));
-        for (auto& f : eqLow) *f.coefficients = c;
-        lastEq[0] = gains[0];
-    }
-    if (std::abs (gains[1] - lastEq[1]) > 0.01f)
-    {
-        const auto c = C::makePeakFilter (sr, 1000.0, 0.7f, juce::Decibels::decibelsToGain (gains[1]));
-        for (auto& f : eqMid) *f.coefficients = c;
-        lastEq[1] = gains[1];
-    }
-    if (std::abs (gains[2] - lastEq[2]) > 0.01f)
-    {
-        const auto c = C::makeHighShelf (sr, 8000.0, 0.707f, juce::Decibels::decibelsToGain (gains[2]));
-        for (auto& f : eqHigh) *f.coefficients = c;
-        lastEq[2] = gains[2];
-    }
+void SNSynthProcessor::setChainOrder (std::array<int, Chain::numBlocks> order)
+{
+    // Must contain each block once; otherwise fall back to the default.
+    auto sorted = order;
+    std::sort (sorted.begin(), sorted.end());
+    if (sorted != Chain::defaultOrder())
+        order = Chain::defaultOrder();
+
+    for (size_t i = 0; i < order.size(); ++i)
+        chainOrder[i].store (order[i]);
+
+    juce::StringArray parts;
+    for (int b : order)
+        parts.add (juce::String (b));
+    parameters.state.setProperty (StateIDs::chainOrder, parts.joinIntoString (","), nullptr);
+
+    // Older versions only read the filter order; keep it in step.
+    const auto f = getSlotOrder();
+    parameters.state.setProperty (StateIDs::slotOrder,
+                                  juce::String (f[0]) + "," + juce::String (f[1]) + "," + juce::String (f[2]), nullptr);
+}
+
+void SNSynthProcessor::moveBlock (int position, int newPosition)
+{
+    auto order = getChainOrder();
+    const int n = (int) order.size();
+    if (position < 0 || position >= n || newPosition < 0 || newPosition >= n || position == newPosition)
+        return;
+    const int block = order[(size_t) position];
+    std::vector<int> v (order.begin(), order.end());
+    v.erase (v.begin() + position);
+    v.insert (v.begin() + newPosition, block);
+    std::copy (v.begin(), v.end(), order.begin());
+    setChainOrder (order);
 }
 
 std::array<int, 3> SNSynthProcessor::getSlotOrder() const
 {
-    return { slotOrder[0].load(), slotOrder[1].load(), slotOrder[2].load() };
+    std::array<int, 3> f {};
+    int n = 0;
+    for (int b : getChainOrder())
+        if (Chain::isFilter (b))
+            f[(size_t) n++] = b;
+    return f;
 }
 
-void SNSynthProcessor::setSlotOrder (std::array<int, 3> order)
+void SNSynthProcessor::setSlotOrder (std::array<int, 3> filters)
 {
-    // Must be a permutation of 0, 1, 2; otherwise fall back to the default.
-    auto sorted = order;
-    std::sort (sorted.begin(), sorted.end());
-    if (sorted != std::array<int, 3> { 0, 1, 2 })
-        order = { 0, 1, 2 };
-
-    for (size_t i = 0; i < 3; ++i)
-        slotOrder[i].store (order[i]);
-
-    parameters.state.setProperty (StateIDs::slotOrder,
-                                  juce::String (order[0]) + "," + juce::String (order[1]) + "," + juce::String (order[2]),
-                                  nullptr);
+    // Put the filters in this order, in the places filters already hold.
+    auto order = getChainOrder();
+    int n = 0;
+    for (auto& b : order)
+        if (Chain::isFilter (b))
+            b = filters[(size_t) n++];
+    setChainOrder (order);
 }
 
 void SNSynthProcessor::moveSlot (int position, int delta)
@@ -340,23 +335,42 @@ void SNSynthProcessor::moveSlot (int position, int delta)
     const int other = position + delta;
     if (position < 0 || position > 2 || other < 0 || other > 2)
         return;
-
-    auto order = getSlotOrder();
-    std::swap (order[(size_t) position], order[(size_t) other]);
-    setSlotOrder (order);
+    auto f = getSlotOrder();
+    std::swap (f[(size_t) position], f[(size_t) other]);
+    setSlotOrder (f);
 }
 
 void SNSynthProcessor::applySlotOrderFromState()
 {
-    juce::StringArray parts;
-    parts.addTokens (parameters.state.getProperty (StateIDs::slotOrder, "0,1,2").toString(), ",", "");
-    std::array<int, 3> order { 0, 1, 2 };
-    if (parts.size() == 3)
-        for (size_t i = 0; i < 3; ++i)
-            order[i] = parts[(int) i].getIntValue();
-    setSlotOrder (order);
-}
+    auto parse = [] (const juce::String& text, int count)
+    {
+        juce::StringArray parts;
+        parts.addTokens (text, ",", "");
+        std::vector<int> v;
+        if (parts.size() == count)
+            for (auto& part : parts)
+                v.push_back (part.getIntValue());
+        return v;
+    };
 
+    auto chain = parse (parameters.state.getProperty (StateIDs::chainOrder).toString(), Chain::numBlocks);
+    if (chain.size() == (size_t) Chain::numBlocks)
+    {
+        std::array<int, Chain::numBlocks> o {};
+        std::copy (chain.begin(), chain.end(), o.begin());
+        setChainOrder (o);
+        return;
+    }
+
+    // Projects from before the chain could be reordered: filters in their
+    // saved order, then Amp, then EQ (exactly how they used to run).
+    auto f = parse (parameters.state.getProperty (StateIDs::slotOrder, "0,1,2").toString(), 3);
+    std::array<int, Chain::numBlocks> o = Chain::defaultOrder();
+    if (f.size() == 3)
+        for (size_t i = 0; i < 3; ++i)
+            o[i] = f[i];
+    setChainOrder (o);
+}
 
 float SNSynthProcessor::lfoShapeValue (int shape, double phase, float randomValue)
 {

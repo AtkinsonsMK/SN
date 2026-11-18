@@ -27,8 +27,8 @@ struct LiveInfo
     std::atomic<int>   activeVoices { 0 };
 
     // The sound at each stage of the chain, sample by sample:
-    // 0 oscillator, 1-3 after each filter position, 4 after EQ, 5 output.
-    static constexpr int numStages = 6;
+    // 0 oscillators, 1-5 after each position in the chain, 6 output.
+    static constexpr int numStages = 7;
     struct Frame { float v[numStages]; };
     static constexpr int ringSize = 1 << 15;
 

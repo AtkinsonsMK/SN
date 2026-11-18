@@ -23,11 +23,12 @@ struct VoiceSettings
     float glideSeconds = 0.0f;
 
     FilterSlotSettings slots[3];
-    int order[3] = { 0, 1, 2 };   // processing order of the slots
+    int order[Chain::numBlocks] = { 0, 1, 2, 3, 4 }; // processing order: filters 0-2, 3 Amp, 4 EQ
+    float eqLowDb = 0.0f, eqMidDb = 0.0f, eqHighDb = 0.0f;
 
     // For the displays: per-sample stage outputs summed over all voices
     // (0 oscillator, 1-3 after each filter position), and live note info.
-    float* taps[4] = { nullptr, nullptr, nullptr, nullptr };
+    float* taps[1 + Chain::numBlocks] = {}; // 0 oscillators, then after each chain position
     LiveInfo* live = nullptr;
     int noteCounter = 0;   // increases with every note played
     int newestNote = 0;    // the counter value of the most recent note
@@ -92,9 +93,51 @@ inline void applyTarget (VoiceSettings& v, int t, float x)
         case aenvR:      v.aenvR = x; break;
         case Mod::drift: v.drift = x * 0.01f; break;
         case Mod::glide: v.glideSeconds = x; break;
-        default: break; // EQ and Volume are handled by the processor
+        case Mod::eqLow:  v.eqLowDb = x; break;
+        case Mod::eqMid:  v.eqMidDb = x; break;
+        case Mod::eqHigh: v.eqHighDb = x; break;
+        default: break; // Volume is handled by the processor
     }
 }
+
+// One EQ band for one voice (transposed direct form II).
+struct Biquad
+{
+    float b0 = 1, b1 = 0, b2 = 0, a1 = 0, a2 = 0, z1 = 0, z2 = 0;
+
+    void set (const std::array<float, 6>& c)
+    {
+        const float inv = 1.0f / c[3];
+        b0 = c[0] * inv; b1 = c[1] * inv; b2 = c[2] * inv; a1 = c[4] * inv; a2 = c[5] * inv;
+    }
+    float process (float x)
+    {
+        const float y = b0 * x + z1;
+        z1 = b1 * x - a1 * y + z2;
+        z2 = b2 * x - a2 * y;
+        return y;
+    }
+    void reset() { z1 = z2 = 0.0f; }
+};
+
+// The 3-band EQ (Low shelf 100 Hz, Mid bell 1 kHz, High shelf 8 kHz).
+struct VoiceEq
+{
+    Biquad low, mid, high;
+    float lastDb[3] = { 1000.0f, 1000.0f, 1000.0f };
+    bool flat = true;
+
+    void update (double sr, float lowDb, float midDb, float highDb)
+    {
+        using C = juce::dsp::IIR::ArrayCoefficients<float>;
+        if (std::abs (lowDb - lastDb[0]) > 0.01f)  { low.set  (C::makeLowShelf  (sr, 100.0,  0.707f, juce::Decibels::decibelsToGain (lowDb)));  lastDb[0] = lowDb; }
+        if (std::abs (midDb - lastDb[1]) > 0.01f)  { mid.set  (C::makePeakFilter (sr, 1000.0, 0.7f,   juce::Decibels::decibelsToGain (midDb)));  lastDb[1] = midDb; }
+        if (std::abs (highDb - lastDb[2]) > 0.01f) { high.set (C::makeHighShelf (sr, 8000.0, 0.707f, juce::Decibels::decibelsToGain (highDb))); lastDb[2] = highDb; }
+        flat = std::abs (lowDb) < 0.01f && std::abs (midDb) < 0.01f && std::abs (highDb) < 0.01f;
+    }
+    float process (float x) { return high.process (mid.process (low.process (x))); }
+    void reset() { low.reset(); mid.reset(); high.reset(); }
+};
 
 struct SynthSound : public juce::SynthesiserSound
 {
@@ -172,6 +215,7 @@ public:
             subPhase = 0.0;
             for (auto& f : filters)
                 f.reset();
+            eq.reset();
             sSub = shared.subLevel;
             sFm12 = shared.fm1to2; sFm21 = shared.fm2to1; sRing = shared.ringMod;
             sLvl1 = shared.osc[0].level; sLvl2 = shared.osc[1].level;
@@ -248,6 +292,7 @@ public:
                 const float keyTrackOct = cur.keyTracking * (float) (currentNote - 60.0) / 12.0f; // follows Glide
                 for (int s = 0; s < 3; ++s)
                     baseOct[s] = std::log2 (cur.slots[s].cutoffHz) + keyTrackOct;
+                eq.update (sr, cur.eqLowDb, cur.eqMidDb, cur.eqHighDb);
                 tune1 = std::exp2 (cur.osc[0].tuneSemitones() / 12.0);
                 tune2 = std::exp2 (cur.osc[1].tuneSemitones() / 12.0);
             }
@@ -303,19 +348,34 @@ public:
             const float gain = ampEnv.next() * noteGain;
             if (cur.taps[0] != nullptr) cur.taps[0][pos] += osc * gain;
 
-            float filtered = osc;
-            for (int n = 0; n < 3; ++n)
+            // The chain: Filters 1-3, Amp and EQ in the chosen order.
+            float x = osc;
+            bool ampDone = false;
+            for (int n = 0; n < Chain::numBlocks; ++n)
             {
-                const int s = cur.order[n];
-                const auto& slot = cur.slots[s];
-                const float cutoffOct = baseOct[s] + fenv * slot.envAmount * envOctavesAtFull + lfoOct;
-                lastCutoffHz[s] = std::exp2 (juce::jlimit (4.3f, 14.3f, cutoffOct));
-                filtered = filters[s].process (filtered, slot, lastCutoffHz[s]);
-                if (cur.taps[n + 1] != nullptr) cur.taps[n + 1][pos] += filtered * gain;
+                const int b = cur.order[n];
+                if (Chain::isFilter (b))
+                {
+                    const auto& slot = cur.slots[b];
+                    const float cutoffOct = baseOct[b] + fenv * slot.envAmount * envOctavesAtFull + lfoOct;
+                    lastCutoffHz[b] = std::exp2 (juce::jlimit (4.3f, 14.3f, cutoffOct));
+                    x = filters[b].process (x, slot, lastCutoffHz[b]);
+                }
+                else if (b == Chain::amp)
+                {
+                    x *= gain;
+                    ampDone = true;
+                }
+                else if (! eq.flat)
+                {
+                    x = eq.process (x);
+                }
+                // The displays show each stage at the level you'd hear it.
+                if (cur.taps[n + 1] != nullptr) cur.taps[n + 1][pos] += ampDone ? x : x * gain;
             }
             lastFreq = (float) (freq * tune1);
 
-            const float sample = filtered * gain;
+            const float sample = x;
 
             for (int ch = 0; ch < numChannels; ++ch)
                 output.addSample (ch, pos, sample);
@@ -435,6 +495,7 @@ private:
 
     Envelope ampEnv, filterEnv;
     FilterSlot filters[3];
+    VoiceEq eq;
 
     int    targetNote    = 60;
     double currentNote   = 60.0;

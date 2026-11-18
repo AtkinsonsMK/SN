@@ -115,8 +115,15 @@ The **output meter** next to Volume shows the level in dB: the solid bar is the 
 
 The panel scales: it opens at a size that fits your screen, and you can drag the bottom-right corner to resize it.
 
-Filter slots run in series; the < > buttons on each slot change the order,
-which is saved with the project.
+## Processing order
+
+The strip above the filters shows the order the sound flows through:
+**Oscillators → Filter 1 → Filter 2 → Filter 3 → Amp → EQ → Volume**.
+Drag any of the five middle blocks left or right to move it. The order is saved with the project.
+
+- **Amp** is where the amp envelope (and velocity) shapes the volume. Moving it before a filter with Drive means quiet parts of the note drive that filter less, so the tone changes as the note fades, like an analogue VCA before a distortion stage.
+- **EQ** before the filters shapes what goes into them (for example, a bass boost into a driven filter growls more); after them, it just shapes the final tone.
+- Oscillators always come first and Volume (with the Limiter) always comes last.
 
 ## Building from source
 

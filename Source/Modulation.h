@@ -53,8 +53,8 @@ namespace Mod
     // Filter slot targets: control 0 Cutoff, 1 Resonance, 2 Drive, 3 Env, 4 Type knob.
     constexpr int filterTarget (int slot, int control) { return f1Cutoff + slot * 5 + control; }
 
-    // EQ and Volume act on the whole sound rather than on each note.
-    constexpr bool isGlobal (int t) { return t >= eqLow; }
+    // Volume acts on the whole sound rather than on each note.
+    constexpr bool isGlobal (int t) { return t == volume; }
 
     // Cutoff is moved in octaves: an amount of 100% = 10 octaves (the whole range).
     constexpr bool isCutoff (int t) { return t == f1Cutoff || t == f2Cutoff || t == f3Cutoff; }
