@@ -167,13 +167,13 @@ SNSynthEditor::SNSynthEditor (SNSynthProcessor& p)
     oversamplingAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment> (processor.parameters, oversampling, oversamplingBox);
     oversamplingLabel.setText ("Filter oversampling", juce::dontSendNotification);
     oversamplingLabel.setColour (juce::Label::textColourId, dimText);
-    oversamplingLabel.setFont (juce::FontOptions (12.0f));
+    oversamplingLabel.setFont (Theme::label (11.5f));
     content.addAndMakeVisible (oversamplingLabel);
 
     // Modulation sources: pick one, then drag any knob to connect it.
-    modulateLabel.setText ("MODULATE WITH", juce::dontSendNotification);
+    modulateLabel.setText ("Modulate with", juce::dontSendNotification);
     modulateLabel.setColour (juce::Label::textColourId, dimText);
-    modulateLabel.setFont (juce::FontOptions (12.0f, juce::Font::bold));
+    modulateLabel.setFont (Theme::font (12.0f, true));
     modulateLabel.setJustificationType (juce::Justification::centredRight);
     content.addAndMakeVisible (modulateLabel);
     for (int src = 0; src < Mod::numSources; ++src)
@@ -185,7 +185,7 @@ SNSynthEditor::SNSynthEditor (SNSynthProcessor& p)
         b.setColour (juce::TextButton::buttonColourId, panel);
         b.setColour (juce::TextButton::buttonOnColourId, Mod::sourceColour (src));
         b.setColour (juce::TextButton::textColourOffId, Mod::sourceColour (src));
-        b.setColour (juce::TextButton::textColourOnId, background);
+        b.setColour (juce::TextButton::textColourOnId, juce::Colours::white);
         b.setTooltip ("Click, then drag any knob to set how much " + juce::String (Mod::sourceName (src)) + " moves it");
         b.onClick = [this, src] { selectSource (modSource == src ? -1 : src); };
         content.addAndMakeVisible (b);
@@ -528,37 +528,27 @@ void SNSynthEditor::paintContent (juce::Graphics& g)
 
     auto header = content.getLocalBounds().removeFromTop (60).reduced (20, 0);
     g.setColour (text);
-    g.setFont (juce::Font (juce::FontOptions (30.0f, juce::Font::bold)).withExtraKerningFactor (-0.03f));
-    g.drawText ("SN", header.withWidth (60), juce::Justification::centredLeft);
-    g.setFont (juce::Font (juce::FontOptions (11.0f)).withExtraKerningFactor (0.12f));
-    g.setColour (dimText);
-    g.drawText ("SYNTH", header.withTrimmedLeft (52).withWidth (80).withTrimmedTop (6), juce::Justification::centredLeft);
+    g.setFont (Theme::font (26.0f, true));
+    g.drawText ("SN Synth", header, juce::Justification::centredLeft);
 
-    g.setFont (Theme::value (11.0f));
-    g.drawText ("v" + juce::String (JucePlugin_VersionString) + "  /  " + juce::String (processor.getActiveVoiceCount()) + " playing",
+    g.setColour (dimText);
+    g.setFont (Theme::value (12.0f));
+    g.drawText (juce::String (processor.getActiveVoiceCount()) + " playing",
                 header.withTrimmedRight (104), juce::Justification::centredRight);
 
-    // Swiss grid: each panel is a hairline rule with its title beneath, numbered.
+    // Strict grid: each panel is a short ink bar and a flush-left title.
     KnobGroup modGroup;
     modGroup.title = "Modulation";
     modGroup.bounds = modListBounds;
-    int number = 1;
     for (auto* group : { &oscGroup, &osc2Group, &playGroup, &mixGroup, &filterEnvGroup, &ampEnvGroup,
                          &slots[0].group, &slots[1].group, &slots[2].group,
                          &lfo1Group, &lfo2Group, &eqGroup, &outputGroup, &modGroup })
     {
         auto r = group->bounds;
-        g.setColour (panel);
-        g.fillRect (r);
         g.setColour (text);
-        g.fillRect (r.getX(), r.getY(), r.getWidth(), 2);
-        auto titleRow = r.reduced (10, 0).withTrimmedTop (7).removeFromTop (14);
-        g.setFont (Theme::value (10.0f));
-        g.setColour (dimText);
-        g.drawText (juce::String (number++).paddedLeft ('0', 2), titleRow.removeFromLeft (20), juce::Justification::centredLeft);
-        g.setColour (text);
-        g.setFont (Theme::title (11.0f));
-        g.drawText (group->title.toUpperCase(), titleRow, juce::Justification::centredLeft);
+        g.fillRect (r.getX() + 10, r.getY(), 24, 3);
+        g.setFont (Theme::title (13.0f));
+        g.drawText (group->title, r.reduced (10, 0).withTrimmedTop (6).removeFromTop (16), juce::Justification::centredLeft);
     }
 }
 
@@ -828,7 +818,7 @@ void ModList::refresh()
 
 void ModList::paint (juce::Graphics& g)
 {
-    g.setFont (juce::FontOptions (12.5f));
+    g.setFont (Theme::label (12.0f));
     if (rows.empty())
     {
         g.setColour (dimText);
@@ -925,26 +915,21 @@ void ChainStrip::paint (juce::Graphics& g)
     auto r = getLocalBounds().toFloat();
     const auto& typeNames = Params::filterTypeNames();
 
-    g.setColour (panel);
-    g.fillRect (r);
-    g.setColour (text);
-    g.fillRect (r.withHeight (2.0f));
-
     auto endBox = [&] (juce::Rectangle<float> b, const juce::String& t)
     {
         g.setColour (dimText);
-        g.setFont (juce::FontOptions (12.0f, juce::Font::bold));
+        g.setFont (Theme::font (12.0f, true));
         g.drawText (t, b, juce::Justification::centred);
     };
-    endBox (r.withWidth (chainEndW), "OSCILLATORS");
-    endBox (r.withLeft (r.getRight() - chainEndW), "VOLUME");
+    endBox (r.withWidth (chainEndW), "Oscillators");
+    endBox (r.withLeft (r.getRight() - chainEndW), "Volume");
 
     for (int pos = 0; pos <= Chain::numBlocks; ++pos)
     {
         const float x1 = pos < Chain::numBlocks ? blockBounds (pos).getX() : r.getRight() - chainEndW;
         juce::Path a;
-        a.addArrow ({ x1 - chainArrowW + 4.0f, r.getCentreY(), x1 - 4.0f, r.getCentreY() }, 1.5f, 7.0f, 6.0f);
-        g.setColour (accent);
+        a.addArrow ({ x1 - chainArrowW + 5.0f, r.getCentreY(), x1 - 5.0f, r.getCentreY() }, 1.0f, 6.0f, 5.0f);
+        g.setColour (text);
         g.fillPath (a);
     }
 
@@ -960,17 +945,15 @@ void ChainStrip::paint (juce::Graphics& g)
         if (Chain::isFilter (b))
         {
             const int type = (int) processor.parameters.getRawParameterValue (ParamIDs::slot (b, ParamIDs::slotType))->load();
-            label << "  " << typeNames[type];
+            label << "   " << typeNames[type];
             off = type == FilterType::off;
         }
 
-        g.setColour (pos == dragFrom ? accent.withAlpha (0.25f) : background);
+        g.setColour (pos == dragFrom ? accent : Theme::screen);
         g.fillRect (box);
-        g.setColour (pos == dragFrom ? accent : text);
-        g.drawRect (box, 1.0f);
-        g.setColour (off ? dimText : text);
-        g.setFont (juce::FontOptions (13.0f));
-        g.drawText (label, box.reduced (8.0f, 0.0f), juce::Justification::centred, true);
+        g.setColour (pos == dragFrom ? juce::Colours::white : (off ? dimText : text));
+        g.setFont (Theme::font (12.0f, ! off));
+        g.drawText (label, box.reduced (10.0f, 0.0f), juce::Justification::centredLeft, true);
     }
 
     if (dragFrom >= 0 && dropAt >= 0 && dropAt != dragFrom)

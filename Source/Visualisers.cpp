@@ -173,7 +173,7 @@ void Scope::paint (juce::Graphics& g)
     if (peak < 1.0e-4f)
     {
         g.setColour (Colours::text);
-        g.setFont (11.0f);
+        g.setFont (Theme::label (11.0f));
         g.drawText (which == 2 ? "all levels at 0" : "no wave turned up", r, juce::Justification::centred);
         return;
     }
@@ -210,7 +210,7 @@ void FilterCurve::paint (juce::Graphics& g)
     if (! active)
     {
         g.setColour (Colours::text);
-        g.setFont (11.0f);
+        g.setFont (Theme::label (11.0f));
         g.drawText ("off: sound passes straight through",
                     r, juce::Justification::centred);
         return;
@@ -547,7 +547,7 @@ void OutputMeter::paint (juce::Graphics& g)
     g.setColour (clip ? Theme::red : Colours::grid);
     g.fillRect (light.reduced (2.0f, 1.0f));
     g.setColour (clip ? Theme::paper : Colours::text);
-    g.setFont (10.0f);
+    g.setFont (Theme::label (10.0f));
     g.drawText ("CLIP", light, juce::Justification::centred);
 
     r.removeFromTop (3.0f);
@@ -581,18 +581,18 @@ void OutputMeter::paint (juce::Graphics& g)
     g.fillRect (bar.getX(), yFor (holdDb) - 0.5f, bar.getWidth(), 1.0f);
 
     // Scale marks
-    g.setFont (9.0f);
+    g.setFont (Theme::label (9.0f));
     for (float db : { 6.0f, 0.0f, -6.0f, -12.0f, -24.0f, -48.0f })
     {
         const float y = yFor (db);
         g.setColour (db > -0.5f && db < 0.5f ? Theme::red : Colours::text);
         g.drawHorizontalLine ((int) y, bar.getRight(), bar.getRight() + 3.0f);
         g.drawText (juce::String ((int) db), scaleArea.withY (y - 6.0f).withHeight (12.0f).withTrimmedLeft (4.0f),
-                    juce::Justification::centredLeft);
+                    juce::Justification::centredLeft, false);
     }
 
     g.setColour (holdDb > 0.0f ? Theme::red : Colours::text);
-    g.setFont (10.0f);
+    g.setFont (Theme::label (10.0f));
     g.drawText (holdDb <= -100.0f ? juce::String ("-inf") : juce::String (holdDb, 1) + " dB", readout,
                 juce::Justification::centred);
 }

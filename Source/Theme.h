@@ -7,48 +7,33 @@
 namespace Theme
 {
     inline const juce::Colour paper   { 0xffe9e5dc }; // background
-    inline const juce::Colour panel   { 0xffefece5 }; // panels, a shade lighter
-    inline const juce::Colour screen  { 0xffdcd7cc }; // displays, a shade darker
+    inline const juce::Colour panel   { 0xffe9e5dc }; // panels sit flat on the paper
+    inline const juce::Colour screen  { 0xffdedad0 }; // displays and fields, a shade darker
     inline const juce::Colour ink     { 0xff1b1b19 }; // text, lines, knobs
     inline const juce::Colour dim     { 0xff77736a }; // secondary text
     inline const juce::Colour line    { 0xff1b1b19 }; // hairlines
-    inline const juce::Colour grid    { 0xffc9c3b6 }; // grid lines inside displays
+    inline const juce::Colour grid    { 0xffcfcabf }; // grid lines inside displays
     inline const juce::Colour accent  { 0xffff4f1a }; // the one "future wave" colour
     inline const juce::Colour trace2  { 0xff3a5bd9 }; // second trace (Numbers, peak line)
     inline const juce::Colour red     { 0xffd9301a }; // over 0 dB
 
-    inline float hairline() { return 1.0f; }
-
-    inline juce::Font label (float size = 11.0f)  { return juce::Font (juce::FontOptions (size)); }
-    inline juce::Font title (float size = 11.0f)  { return juce::Font (juce::FontOptions (size, juce::Font::bold)).withExtraKerningFactor (0.08f); }
-    inline juce::Font value (float size = 12.0f)  { return juce::Font (juce::FontOptions (size)).withExtraKerningFactor (0.02f); }
-
-    // A tile of fine noise, drawn over the whole panel at low strength.
-    inline const juce::Image& grain()
+    // One grotesk at a few sizes and weights. Helvetica Neue on the Mac;
+    // elsewhere the closest available.
+    inline juce::String typeface()
     {
-        static const juce::Image tile = []
-        {
-            juce::Image img (juce::Image::ARGB, 256, 256, true);
-            juce::Random rng (7);
-            for (int y = 0; y < img.getHeight(); ++y)
-                for (int x = 0; x < img.getWidth(); ++x)
-                {
-                    const float n = rng.nextFloat();
-                    if (n < 0.5f)
-                        img.setPixelAt (x, y, juce::Colour (0, 0, 0).withAlpha ((0.5f - n) * 0.16f));
-                    else
-                        img.setPixelAt (x, y, juce::Colour (255, 255, 255).withAlpha ((n - 0.5f) * 0.20f));
-                }
-            return img;
-        }();
-        return tile;
+       #if JUCE_MAC
+        return "Helvetica Neue";
+       #else
+        return "Inter";
+       #endif
     }
-
-    inline void paintGrain (juce::Graphics& g, juce::Rectangle<int> area, float opacity = 1.0f)
+    inline juce::Font font (float size, bool bold = false)
     {
-        g.setTiledImageFill (grain(), 0, 0, opacity);
-        g.fillRect (area);
+        return juce::Font (juce::FontOptions (typeface(), size, bold ? juce::Font::bold : juce::Font::plain));
     }
+    inline juce::Font label (float size = 11.0f)  { return font (size); }
+    inline juce::Font title (float size = 13.0f)  { return font (size, true); }
+    inline juce::Font value (float size = 12.0f)  { return font (size); }
 
     class LookAndFeel : public juce::LookAndFeel_V4
     {
@@ -103,40 +88,22 @@ namespace Theme
 
         // Knob: a thin ink circle, a hairline track, the value as a heavier
         // accent arc, and a straight pointer. No shading, no thumb.
+        // Knob: a flat solid disc with one indicator line. Nothing else.
         void drawRotarySlider (juce::Graphics& g, int x, int y, int w, int h, float pos,
                                float start, float end, juce::Slider& s) override
         {
             auto bounds = juce::Rectangle<int> (x, y, w, h).toFloat().reduced (10.0f);
-            const float radius = juce::jmin (bounds.getWidth(), bounds.getHeight()) * 0.5f;
+            const float radius = juce::jmin (bounds.getWidth(), bounds.getHeight()) * 0.5f * 0.82f;
             const auto c = bounds.getCentre();
             const float angle = start + pos * (end - start);
-            const bool enabled = s.isEnabled();
-            const auto inkCol = ink.withMultipliedAlpha (enabled ? 1.0f : 0.4f);
+            const float alpha = s.isEnabled() ? 1.0f : 0.35f;
 
-            // Track
-            juce::Path track;
-            track.addCentredArc (c.x, c.y, radius, radius, 0.0f, start, end, true);
-            g.setColour (grid);
-            g.strokePath (track, juce::PathStrokeType (1.0f));
+            g.setColour (ink.withMultipliedAlpha (alpha));
+            g.fillEllipse (juce::Rectangle<float> (radius * 2.0f, radius * 2.0f).withCentre (c));
 
-            // Value (from the bottom, or from the centre for -/+ knobs)
-            const bool bipolar = s.getMinimum() < 0.0 && s.getMaximum() > 0.0;
-            const float from = bipolar ? start + (float) s.valueToProportionOfLength (0.0) * (end - start) : start;
-            juce::Path value;
-            value.addCentredArc (c.x, c.y, radius, radius, 0.0f, juce::jmin (from, angle), juce::jmax (from, angle) + 0.0001f, true);
-            g.setColour (accent.withMultipliedAlpha (enabled ? 1.0f : 0.4f));
-            g.strokePath (value, juce::PathStrokeType (2.5f, juce::PathStrokeType::curved, juce::PathStrokeType::butt));
-
-            // Body
-            const float bodyR = radius * 0.72f;
-            g.setColour (panel);
-            g.fillEllipse (juce::Rectangle<float> (bodyR * 2.0f, bodyR * 2.0f).withCentre (c));
-            g.setColour (inkCol);
-            g.drawEllipse (juce::Rectangle<float> (bodyR * 2.0f, bodyR * 2.0f).withCentre (c), 1.0f);
-
-            // Pointer
             const auto dir = juce::Point<float> (std::sin (angle), -std::cos (angle));
-            g.drawLine ({ c + dir * (bodyR * 0.25f), c + dir * bodyR }, 1.5f);
+            g.setColour (accent.withMultipliedAlpha (alpha));
+            g.drawLine ({ c + dir * (radius * 0.15f), c + dir * (radius * 0.92f) }, 2.0f);
         }
 
         juce::Label* createSliderTextBox (juce::Slider& s) override
@@ -153,22 +120,20 @@ namespace Theme
         void drawButtonBackground (juce::Graphics& g, juce::Button& b, const juce::Colour& fill,
                                    bool over, bool down) override
         {
-            auto r = b.getLocalBounds().toFloat().reduced (0.5f);
+            auto r = b.getLocalBounds().toFloat();
             const bool on = b.getToggleState();
-            g.setColour (on ? fill : (down ? grid : (over ? panel.darker (0.03f) : panel)));
+            g.setColour (on ? fill : (down ? grid : (over ? screen.darker (0.04f) : screen)));
             g.fillRect (r);
-            g.setColour (b.findColour (juce::TextButton::textColourOffId).withMultipliedAlpha (b.isEnabled() ? 1.0f : 0.4f));
-            g.drawRect (r, 1.0f);
         }
 
-        juce::Font getTextButtonFont (juce::TextButton&, int) override { return title (11.0f); }
+        juce::Font getTextButtonFont (juce::TextButton&, int) override { return font (12.0f, true); }
 
         void drawButtonText (juce::Graphics& g, juce::TextButton& b, bool, bool) override
         {
             g.setFont (getTextButtonFont (b, b.getHeight()));
             g.setColour (b.findColour (b.getToggleState() ? juce::TextButton::textColourOnId : juce::TextButton::textColourOffId)
                              .withMultipliedAlpha (b.isEnabled() ? 1.0f : 0.4f));
-            g.drawText (b.getButtonText().toUpperCase(), b.getLocalBounds(), juce::Justification::centred);
+            g.drawText (b.getButtonText(), b.getLocalBounds().reduced (8, 0), juce::Justification::centredLeft);
         }
 
         // Toggles: a small square box, filled with a cross-free solid square when on.
@@ -176,13 +141,9 @@ namespace Theme
         {
             auto r = b.getLocalBounds().toFloat();
             auto box = r.removeFromLeft (r.getHeight()).withSizeKeepingCentre (11.0f, 11.0f);
-            g.setColour (ink.withMultipliedAlpha (over ? 1.0f : 0.9f));
-            g.drawRect (box, 1.0f);
-            if (b.getToggleState())
-            {
-                g.setColour (accent);
-                g.fillRect (box.reduced (2.5f));
-            }
+            juce::ignoreUnused (over);
+            g.setColour (b.getToggleState() ? accent : grid);
+            g.fillRect (box);
             g.setColour (b.findColour (juce::ToggleButton::textColourId));
             g.setFont (label (12.0f));
             g.drawFittedText (b.getButtonText(), r.withTrimmedLeft (5.0f).toNearestInt(), juce::Justification::centredLeft, 2);
@@ -191,10 +152,8 @@ namespace Theme
         void drawComboBox (juce::Graphics& g, int w, int h, bool, int, int, int, int, juce::ComboBox& box) override
         {
             auto r = juce::Rectangle<float> (0.0f, 0.0f, (float) w, (float) h).reduced (0.5f);
-            g.setColour (panel);
+            g.setColour (screen);
             g.fillRect (r);
-            g.setColour (line);
-            g.drawRect (r, 1.0f);
             const float ax = (float) w - 16.0f, ay = (float) h * 0.5f;
             juce::Path arrow;
             arrow.startNewSubPath (ax - 4.0f, ay - 2.0f);
@@ -216,8 +175,7 @@ namespace Theme
         void drawPopupMenuBackground (juce::Graphics& g, int w, int h) override
         {
             g.fillAll (panel);
-            g.setColour (line);
-            g.drawRect (0, 0, w, h, 1);
+            juce::ignoreUnused (w, h);
         }
 
         int getPopupMenuBorderSize() override { return 1; }

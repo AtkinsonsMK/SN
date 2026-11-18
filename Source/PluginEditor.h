@@ -151,7 +151,6 @@ private:
     {
         std::function<void (juce::Graphics&)> painter;
         void paint (juce::Graphics& g) override { if (painter) painter (g); }
-        void paintOverChildren (juce::Graphics& g) override { Theme::paintGrain (g, getLocalBounds(), 0.9f); }
     } content;
 
     std::vector<std::unique_ptr<Knob>> knobs;
