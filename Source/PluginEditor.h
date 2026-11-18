@@ -80,6 +80,24 @@ private:
     static constexpr int rowH = 20;
 };
 
+// The drum machine's 16-step grid: one row per drum. Click a step to turn
+// it on or off; drag across to paint several. The step playing now is lit.
+class DrumGrid : public juce::Component
+{
+public:
+    explicit DrumGrid (SNSynthProcessor& p) : processor (p) { setWantsKeyboardFocus (false); }
+    void paint (juce::Graphics&) override;
+    void mouseDown (const juce::MouseEvent&) override;
+    void mouseDrag (const juce::MouseEvent&) override;
+    juce::Rectangle<float> cellBounds (int drum, int step) const;
+
+private:
+    bool cellAt (juce::Point<float> pos, int& drum, int& step) const;
+    SNSynthProcessor& processor;
+    bool paintOn = true;
+    int lastDrum = -1, lastStep = -1;
+};
+
 // A titled panel of knobs.
 struct KnobGroup
 {
@@ -114,7 +132,7 @@ public:
     void resized() override;
 
     // The panel is laid out at this size and scaled to the window.
-    static constexpr int baseW = 1200, baseH = 1130;
+    static constexpr int baseW = 1200, baseH = 1370;
 
     SNSynthProcessor& getProcessor() { return processor; }
     int getSelectedSource() const { return modSource; }
@@ -180,7 +198,22 @@ private:
     juce::Label modulateLabel;
     int modSource = -1; // the source being assigned, or -1
     ModList modList;
-    juce::Rectangle<int> modListBounds, chainBounds;
+    juce::Rectangle<int> modListBounds, chainBounds, drumBounds, drumHeaderRow;
+
+    // Drum machine
+    DrumGrid drumGrid { processor };
+    juce::TextButton drumPlayButton { "Play" };
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> drumPlayAttachment;
+    Knob* drumTempoKnob = nullptr;
+    Knob* drumSwingKnob = nullptr;
+    std::array<juce::TextButton, Drums::numDrums> drumNames;
+    std::array<std::array<Knob*, 4>, Drums::numDrums> drumKnobs {};
+    std::array<juce::ComboBox, Drums::numDrums> drumRoutes;
+    std::array<std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment>, Drums::numDrums> drumRouteAttachments;
+    std::array<float, Drums::numDrums> drumFlash {};
+    bool spaceHeld = false;
+    void setupDrums();
+    void layoutDrums (juce::Rectangle<int> area);
     std::vector<juce::Rectangle<int>> dividers;
     std::vector<ModRing*> rings;
     float matrixChecksum = 0.0f;

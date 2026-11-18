@@ -1,6 +1,7 @@
 #pragma once
 
 #include <juce_audio_processors/juce_audio_processors.h>
+#include "Drums.h"
 
 // Parameter IDs are saved inside FL Studio projects and automation clips.
 // Never rename or reuse an ID once it has shipped; add new ones instead.
@@ -88,6 +89,20 @@ namespace ParamIDs
 
     // Output
     inline constexpr const char* volume = "volume";
+
+    // Drum machine (added in v1.3). Per drum: "kick_tune", "snare_decay" ...
+    inline constexpr const char* drumPlay  = "drum_play";
+    inline constexpr const char* drumTempo = "drum_tempo";
+    inline constexpr const char* drumSwing = "drum_swing";
+    inline constexpr const char* drumTune  = "tune";
+    inline constexpr const char* drumDecay = "decay";
+    inline constexpr const char* drumTone  = "tone";
+    inline constexpr const char* drumLevel = "level";
+    inline constexpr const char* drumRoute = "route";
+    inline juce::String drum (int drumIndex, const char* control)
+    {
+        return juce::String (Drums::drumId (drumIndex)) + "_" + control;
+    }
 }
 
 // Non-automatable settings stored with the project / preset.
@@ -95,6 +110,7 @@ namespace StateIDs
 {
     inline constexpr const char* slotOrder  = "slotOrder";  // filters only, e.g. "0,1,2" (older versions)
     inline constexpr const char* chainOrder = "chainOrder"; // whole chain, e.g. "0,1,2,3,4"
+    inline constexpr const char* drumPattern = "drumPattern"; // the 16-step grid, see Drums::Pattern
 }
 
 // The processing chain after the oscillators: three filter slots, the Amp
@@ -305,6 +321,29 @@ namespace Params
                 ParameterID { ParamIDs::volume, 1 }, "Volume", range, -6.0f,
                 AudioParameterFloatAttributes().withLabel ("dB").withStringFromValueFunction (
                     [] (float v, int) { return v <= -60.0f ? String ("-inf dB") : String (v, 1) + " dB"; })));
+        }
+
+        // Drum machine (28)
+        layout.add (std::make_unique<AudioParameterBool> (ParameterID { ParamIDs::drumPlay, 1 }, "Drums Play", false));
+        layout.add (std::make_unique<AudioParameterFloat> (
+            ParameterID { ParamIDs::drumTempo, 1 }, "Drums Tempo", NormalisableRange<float> (60.0f, 200.0f, 1.0f), 120.0f,
+            AudioParameterFloatAttributes().withLabel ("BPM").withStringFromValueFunction (
+                [] (float v, int) { return String (roundToInt (v)) + " BPM"; })));
+        layout.add (percent (ParamIDs::drumSwing, "Drums Swing", 0.0f, 100.0f, 0.0f));
+        for (int d = 0; d < Drums::numDrums; ++d)
+        {
+            const String n = String (Drums::drumName (d)) + " ";
+            layout.add (std::make_unique<AudioParameterFloat> (
+                ParameterID { ParamIDs::drum (d, ParamIDs::drumTune), 1 }, n + "Tune",
+                NormalisableRange<float> (-12.0f, 12.0f, 0.1f), 0.0f,
+                AudioParameterFloatAttributes().withLabel ("st").withStringFromValueFunction (
+                    [] (float v, int) { return (v > 0.04f ? "+" : "") + String (v, 1) + " st"; })));
+            layout.add (percent (ParamIDs::drum (d, ParamIDs::drumDecay), n + "Decay", 0.0f, 100.0f, 50.0f));
+            layout.add (percent (ParamIDs::drum (d, ParamIDs::drumTone),  n + "Tone",  0.0f, 100.0f, 50.0f));
+            layout.add (percent (ParamIDs::drum (d, ParamIDs::drumLevel), n + "Level", 0.0f, 100.0f, 80.0f));
+            layout.add (std::make_unique<AudioParameterChoice> (
+                ParameterID { ParamIDs::drum (d, ParamIDs::drumRoute), 1 }, n + "Route",
+                StringArray { "Dry", "Filter 1", "Filter 2", "Filter 3" }, 0));
         }
 
         return layout;

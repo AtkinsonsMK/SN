@@ -25,6 +25,13 @@ SNSynthProcessor::SNSynthProcessor()
     }
     voiceSettings.mod = &modContext;
 
+    for (int d = 0; d < Drums::numDrums; ++d)
+    {
+        auto get = [&] (const char* c) { return parameters.getRawParameterValue (ParamIDs::drum (d, c)); };
+        drumParams[(size_t) d] = { get (ParamIDs::drumTune), get (ParamIDs::drumDecay), get (ParamIDs::drumTone),
+                                   get (ParamIDs::drumLevel), get (ParamIDs::drumRoute) };
+    }
+
     if (wrapperType == wrapperType_Standalone)
         outputFollower = std::make_unique<OutputFollower>();
 }
@@ -52,6 +59,16 @@ void SNSynthProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     updateVoiceSettings();
     synth.setCurrentPlaybackSampleRate (sampleRate);
     keyboardState.reset();
+
+    for (int d = 0; d < Drums::numDrums; ++d)
+        drumVoices[(size_t) d].prepare (d, (float) sampleRate);
+    for (auto& f : drumFilters)
+        f.prepare ((float) sampleRate);
+    drumEq.reset();
+    sequencer.prepare (sampleRate);
+    for (auto& b : drumBus)
+        b.assign ((size_t) juce::jmax (samplesPerBlock, 512), 0.0f);
+    drumOut.assign ((size_t) juce::jmax (samplesPerBlock, 512), 0.0f);
 
     outputGain.reset (sampleRate, 0.02);
     outputGain.setCurrentAndTargetValue (volumeDbToGain (volumeParam->load()));
@@ -92,6 +109,7 @@ void SNSynthProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
     }
 
     synth.renderNextBlock (buffer, midi, 0, n);
+    renderDrums (n);
 
     const int numSamples  = buffer.getNumSamples();
     const int numChannels = buffer.getNumChannels();
@@ -115,12 +133,16 @@ void SNSynthProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
         outputGain.setTargetValue (volumeDbToGain (volDb));
         for (int i = start; i < start + len; ++i)
         {
-            const float g = outputGain.getNextValue() * voiceComp.getNextValue();
+            // Voice Gain Comp is for the keyboard notes only; the drums join
+            // after it, then Volume turns both up or down.
+            const float vc = voiceComp.getNextValue();
+            const float og = outputGain.getNextValue();
+            const float drums = drumOut[(size_t) i];
             float peak = 0.0f;
             for (int ch = 0; ch < numChannels; ++ch)
             {
                 auto& x = buffer.getWritePointer (ch)[i];
-                x *= g;
+                x = (x * vc + drums) * og;
                 if (! std::isfinite (x))
                     x = 0.0f; // safety: a broken value never reaches the speakers
                 peak = juce::jmax (peak, std::abs (x));
@@ -243,6 +265,150 @@ void SNSynthProcessor::updateVoiceSettings()
         v.order[i] = chainOrder[i].load();
 
     synth.setVoiceLimit ((int) p (ParamIDs::voices)->load());
+}
+
+void SNSynthProcessor::hitDrum (int d)
+{
+    const auto& ds = drumSettings[(size_t) d];
+    drumVoices[(size_t) d].trigger (ds);
+    drumHitLevel[(size_t) d].store (1.0f);
+
+    // A Lowpass Gate is "struck" by the drums that reach it.
+    if (ds.route != Drums::dry)
+    {
+        bool reached = false;
+        for (int n = 0; n < Chain::numBlocks; ++n)
+        {
+            const int b = voiceSettings.order[n];
+            reached = reached || b == ds.route - 1;
+            if (reached && Chain::isFilter (b))
+                drumFilters[(size_t) b].trigger ((float) currentSampleRate);
+        }
+    }
+}
+
+// The drum machine: runs the step clock, plays the drums, and sends each
+// one either straight out or into its filter, through the rest of the chain.
+void SNSynthProcessor::renderDrums (int numSamples)
+{
+    for (auto* b : { &drumBus[0], &drumBus[1], &drumBus[2], &drumBus[3], &drumOut })
+    {
+        if ((int) b->size() < numSamples)
+            b->resize ((size_t) numSamples); // only if the host exceeds its announced block size
+        std::fill (b->begin(), b->begin() + numSamples, 0.0f);
+    }
+
+    for (int d = 0; d < Drums::numDrums; ++d)
+    {
+        const auto& dp = drumParams[(size_t) d];
+        auto& ds = drumSettings[(size_t) d];
+        ds.tune  = dp.tune->load();
+        ds.decay = dp.decay->load() * 0.01f;
+        ds.tone  = dp.tone->load() * 0.01f;
+        ds.level = dp.level->load() * 0.01f;
+        ds.route = juce::jlimit (0, Drums::numRoutes - 1, (int) dp.route->load());
+    }
+
+    // In a DAW, follow its tempo, position and play button.
+    Drums::Sequencer::HostInfo host;
+    if (wrapperType != wrapperType_Standalone)
+        if (auto* ph = getPlayHead())
+            if (auto pos = ph->getPosition())
+                if (pos->getBpm().hasValue() && pos->getPpqPosition().hasValue())
+                {
+                    host.valid = true;
+                    host.playing = pos->getIsPlaying();
+                    host.bpm = *pos->getBpm();
+                    host.ppq = *pos->getPpqPosition();
+                }
+
+    const bool running = sequencer.begin (p (ParamIDs::drumPlay)->load() > 0.5f, p (ParamIDs::drumTempo)->load(),
+                                          p (ParamIDs::drumSwing)->load() * 0.01f, host);
+    if (! running)
+        drumStep.store (-1);
+
+    const uint32_t audition = auditionMask.exchange (0);
+    for (int d = 0; d < Drums::numDrums; ++d)
+        if (audition & (1u << d))
+            hitDrum (d);
+
+    const auto& m = modContext;
+    bool anyDrumRoutes = false;
+    for (int r = 0; r < m.numRoutes; ++r)
+    {
+        const int t = m.routes[(size_t) r].target;
+        anyDrumRoutes = anyDrumRoutes || (t >= Mod::f1Cutoff && t <= Mod::f3Char) || (t >= Mod::eqLow && t <= Mod::eqHigh);
+    }
+
+    for (int i = 0; i < numSamples; ++i)
+    {
+        if (running)
+        {
+            const int step = sequencer.tick();
+            if (step >= 0)
+            {
+                drumStep.store (step);
+                for (int d = 0; d < Drums::numDrums; ++d)
+                    if (drumPattern.get (d, step))
+                        hitDrum (d);
+            }
+        }
+        for (int d = 0; d < Drums::numDrums; ++d)
+        {
+            auto& v = drumVoices[(size_t) d];
+            if (v.isActive())
+            {
+                const auto& ds = drumSettings[(size_t) d];
+                drumBus[(size_t) ds.route][(size_t) i] += v.next() * ds.level * drumGain;
+            }
+        }
+
+        // Filter and EQ settings for the drums: the knobs, moved by the LFOs
+        // and the mod wheel (the drums have no envelopes, velocity or key).
+        if (i % SynthVoice::modInterval == 0)
+        {
+            drumCur = voiceSettings;
+            if (anyDrumRoutes)
+            {
+                float src[Mod::numSources] {};
+                src[Mod::lfo1] = lfoBuffers[0][(size_t) i];
+                src[Mod::lfo2] = lfoBuffers[1][(size_t) i];
+                src[Mod::modWheel] = m.modWheel;
+                float offset[Mod::numTargets] {};
+                bool touched[Mod::numTargets] {};
+                for (int r = 0; r < m.numRoutes; ++r)
+                {
+                    const auto& route = m.routes[(size_t) r];
+                    const int t = route.target;
+                    if ((t >= Mod::f1Cutoff && t <= Mod::f3Char) || (t >= Mod::eqLow && t <= Mod::eqHigh))
+                    {
+                        offset[t] += src[route.source] * route.amount;
+                        touched[t] = true;
+                    }
+                }
+                for (int t = 0; t < Mod::numTargets; ++t)
+                    if (touched[t])
+                        applyTarget (drumCur, t, Mod::applyOffset (m, t, offset[t]));
+            }
+            drumEq.update (currentSampleRate, drumCur.eqLowDb, drumCur.eqMidDb, drumCur.eqHighDb);
+        }
+
+        float x = 0.0f;
+        for (int n = 0; n < Chain::numBlocks; ++n)
+        {
+            const int b = drumCur.order[n];
+            if (Chain::isFilter (b))
+            {
+                x += drumBus[(size_t) (b + 1)][(size_t) i];
+                const auto& slot = drumCur.slots[b];
+                const float hz = std::exp2 (juce::jlimit (4.3f, 14.3f, std::log2 (juce::jmax (1.0f, slot.cutoffHz))));
+                x = drumFilters[(size_t) b].process (x, slot, hz);
+            }
+            else if (b == Chain::eq && ! drumEq.flat)
+                x = drumEq.process (x);
+        }
+        drumOut[(size_t) i] = x + drumBus[0][(size_t) i];
+    }
 }
 
 // Volume, with its modulation, at sample `pos` of this block.
@@ -470,6 +636,7 @@ juce::AudioProcessorEditor* SNSynthProcessor::createEditor()
 
 void SNSynthProcessor::getStateInformation (juce::MemoryBlock& destData)
 {
+    parameters.state.setProperty (StateIDs::drumPattern, drumPattern.toString(), nullptr);
     auto state = parameters.copyState();
     state.removeChild (state.getChildWithName ("MODULATION"), nullptr);
     state.appendChild (modMatrix.toValueTree(), nullptr);
@@ -484,6 +651,10 @@ void SNSynthProcessor::setStateInformation (const void* data, int sizeInBytes)
         {
             parameters.replaceState (juce::ValueTree::fromXml (*xml));
             applySlotOrderFromState();
+            if (parameters.state.hasProperty (StateIDs::drumPattern))
+                drumPattern.fromString (parameters.state.getProperty (StateIDs::drumPattern).toString());
+            else
+                drumPattern.setDefault();
             modMatrix.fromValueTree (parameters.state.getChildWithName ("MODULATION"));
 
             // Projects from before modulation had one "LFO to Cutoff" knob for

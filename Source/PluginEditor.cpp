@@ -192,6 +192,7 @@ SNSynthEditor::SNSynthEditor (SNSynthProcessor& p)
     }
     content.addAndMakeVisible (modList);
     content.addAndMakeVisible (chainStrip);
+    setupDrums();
 
     heldNotes.fill (-1);
     setWantsKeyboardFocus (true);
@@ -361,6 +362,18 @@ void SNSynthEditor::timerCallback()
         updateSlotTypeDisplay (sp);
 
     chainStrip.repaint();
+
+    // Drums: the playing step, and each drum's name lights up when it plays.
+    drumGrid.repaint();
+    drumPlayButton.setButtonText (drumPlayButton.getToggleState() ? "Stop" : "Play");
+    for (int d = 0; d < Drums::numDrums; ++d)
+    {
+        const float hit = processor.drumHitLevel[(size_t) d].exchange (0.0f);
+        drumFlash[(size_t) d] = juce::jmax (hit, drumFlash[(size_t) d] * 0.75f);
+        auto& b = drumNames[(size_t) d];
+        b.setColour (juce::TextButton::buttonColourId, Theme::screen.interpolatedWith (accent, drumFlash[(size_t) d]));
+        b.setColour (juce::TextButton::textColourOffId, drumFlash[(size_t) d] > 0.5f ? juce::Colours::white : text);
+    }
 }
 
 Knob& SNSynthEditor::makeKnob (const juce::String& paramId, const juce::String& labelText)
@@ -470,6 +483,18 @@ bool SNSynthEditor::handleKeyPress (const juce::KeyPress& key)
     if (mods.isCommandDown() || mods.isCtrlDown() || mods.isAltDown())
         return false;
 
+    // Space starts and stops the drum machine.
+    if (key.getKeyCode() == juce::KeyPress::spaceKey)
+    {
+        if (! spaceHeld)
+        {
+            spaceHeld = true;
+            if (auto* play = processor.parameters.getParameter (ParamIDs::drumPlay))
+                play->setValueNotifyingHost (play->getValue() > 0.5f ? 0.0f : 1.0f);
+        }
+        return true;
+    }
+
     updateHeldKeys();
 
     // Swallow every other plain key, so macOS doesn't play its "bonk" sound.
@@ -478,6 +503,9 @@ bool SNSynthEditor::handleKeyPress (const juce::KeyPress& key)
 
 bool SNSynthEditor::updateHeldKeys()
 {
+    if (spaceHeld && ! juce::KeyPress (juce::KeyPress::spaceKey).isCurrentlyDown())
+        spaceHeld = false;
+
     bool any = false;
     for (size_t i = 0; i < numNoteKeys; ++i)
     {
@@ -544,12 +572,15 @@ void SNSynthEditor::paintContent (juce::Graphics& g)
     KnobGroup modGroup;
     modGroup.title = "Modulation";
     modGroup.bounds = modListBounds;
+    KnobGroup drumGroup;
+    drumGroup.title = "Drums";
+    drumGroup.bounds = drumBounds;
     KnobGroup chainGroup;
     chainGroup.title = "Signal chain   (drag to reorder)";
     chainGroup.bounds = chainBounds;
     for (auto* group : { &oscGroup, &osc2Group, &playGroup, &mixGroup, &filterEnvGroup, &ampEnvGroup,
                          &slots[0].group, &slots[1].group, &slots[2].group,
-                         &lfo1Group, &lfo2Group, &eqGroup, &outputGroup, &modGroup, &chainGroup })
+                         &lfo1Group, &lfo2Group, &eqGroup, &outputGroup, &modGroup, &chainGroup, &drumGroup })
     {
         auto r = group->bounds;
         g.setColour (text);
@@ -557,6 +588,122 @@ void SNSynthEditor::paintContent (juce::Graphics& g)
         g.setFont (Theme::title (13.0f));
         g.drawText (group->title, r.reduced (10, 0).withTrimmedTop (6).removeFromTop (16), juce::Justification::centredLeft);
     }
+
+    // Drum column headings
+    {
+        auto h = drumHeaderRow;
+        g.setColour (dimText);
+        g.setFont (Theme::label (11.5f));
+        h.removeFromLeft (64 + 6);
+        for (auto* name : { "Tune", "Decay", "Tone", "Level" })
+            g.drawText (name, h.removeFromLeft (40), juce::Justification::centred);
+        h.removeFromLeft (8);
+        g.drawText ("Route", h.removeFromLeft (92), juce::Justification::centredLeft);
+        const auto grid = drumGrid.getBounds();
+        for (int s = 0; s < Drums::numSteps; s += 4)
+        {
+            const auto cell = drumGrid.cellBounds (0, s).translated ((float) grid.getX(), 0.0f);
+            g.drawText (juce::String (s + 1), juce::Rectangle<float> (cell.getX(), (float) h.getY(), 30.0f, (float) h.getHeight()),
+                        juce::Justification::centredLeft);
+        }
+    }
+}
+
+void SNSynthEditor::setupDrums()
+{
+    using namespace ParamIDs;
+
+    drumPlayButton.setClickingTogglesState (true);
+    drumPlayButton.setWantsKeyboardFocus (false);
+    drumPlayButton.setColour (juce::TextButton::buttonColourId, Theme::screen);
+    drumPlayButton.setColour (juce::TextButton::buttonOnColourId, accent);
+    drumPlayButton.setColour (juce::TextButton::textColourOffId, text);
+    drumPlayButton.setColour (juce::TextButton::textColourOnId, juce::Colours::white);
+    drumPlayButton.setTooltip ("Start or stop the drums (or press Space). In a DAW they follow the DAW's play button and tempo.");
+    content.addAndMakeVisible (drumPlayButton);
+    drumPlayAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (processor.parameters, drumPlay, drumPlayButton);
+    drumPlayButton.setButtonText (drumPlayButton.getToggleState() ? "Stop" : "Play");
+
+    drumTempoKnob = &makeKnob (drumTempo, "Tempo");
+    drumSwingKnob = &makeKnob (drumSwing, "Swing");
+    drumTempoKnob->slider.setTooltip ("Tempo in beats per minute (standalone app; in a DAW the DAW's tempo is used)");
+    drumSwingKnob->slider.setTooltip ("Swing: pushes every second 16th note later, for a shuffled feel. 100% = half a step");
+
+    static const char* tips[4] = { "Tune: pitch, in semitones", "Decay: how long it rings",
+                                   "Tone: Kick click and punch, Snare snap, Clap and Hat brightness, Rim ring",
+                                   "Level: how loud" };
+    static const char* controls[4] = { drumTune, drumDecay, drumTone, drumLevel };
+    for (int d = 0; d < Drums::numDrums; ++d)
+    {
+        auto& name = drumNames[(size_t) d];
+        name.setButtonText (Drums::drumName (d));
+        name.setWantsKeyboardFocus (false);
+        name.setColour (juce::TextButton::buttonColourId, Theme::screen);
+        name.setColour (juce::TextButton::textColourOffId, text);
+        name.setTooltip ("Click to hear the " + juce::String (Drums::drumName (d)).toLowerCase());
+        name.onClick = [this, d] { processor.auditionDrum (d); };
+        content.addAndMakeVisible (name);
+
+        for (int c = 0; c < 4; ++c)
+        {
+            auto& k = makeKnob (drum (d, controls[c]), {});
+            k.slider.setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
+            k.slider.setPopupDisplayEnabled (true, true, &content);
+            k.slider.setTooltip (juce::String (Drums::drumName (d)) + " " + tips[c]);
+            k.label.setVisible (false);
+            drumKnobs[(size_t) d][(size_t) c] = &k;
+        }
+
+        auto& route = drumRoutes[(size_t) d];
+        route.addItemList ({ "Dry", "Filter 1", "Filter 2", "Filter 3" }, 1);
+        route.setWantsKeyboardFocus (false);
+        route.setColour (juce::ComboBox::backgroundColourId, background);
+        route.setTooltip ("Where this drum goes: straight to the output (Dry), or into a filter and on through "
+                          "the rest of the signal chain");
+        content.addAndMakeVisible (route);
+        drumRouteAttachments[(size_t) d] = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment> (
+            processor.parameters, drum (d, drumRoute), route);
+    }
+    content.addAndMakeVisible (drumGrid);
+}
+
+void SNSynthEditor::layoutDrums (juce::Rectangle<int> area)
+{
+    drumBounds = area;
+    auto inner = area.reduced (6).withTrimmedTop (22);
+
+    // Transport: Play, Tempo, Swing
+    auto transport = inner.removeFromLeft (150);
+    drumPlayButton.setBounds (transport.removeFromTop (30).reduced (4, 0));
+    transport.removeFromTop (8);
+    for (auto* k : { drumTempoKnob, drumSwingKnob })
+    {
+        auto cell = transport.removeFromLeft (75);
+        k->label.setBounds (cell.removeFromTop (16));
+        k->slider.setBounds (cell.removeFromTop (96).reduced (4, 0));
+    }
+    inner.removeFromLeft (16);
+
+    // Column headings, then one row per drum.
+    drumHeaderRow = inner.removeFromTop (16);
+    const int rowH = (inner.getHeight()) / Drums::numDrums;
+    const int nameW = 64, knobW = 40, routeW = 92;
+    auto rows = inner;
+    for (int d = 0; d < Drums::numDrums; ++d)
+    {
+        auto row = rows.removeFromTop (rowH);
+        drumNames[(size_t) d].setBounds (row.removeFromLeft (nameW).reduced (0, 4));
+        row.removeFromLeft (6);
+        for (auto* k : drumKnobs[(size_t) d])
+        {
+            k->slider.setBounds (row.removeFromLeft (knobW).reduced (1, 0));
+            if (k->ring != nullptr) k->ring->setBounds (k->slider.getBounds());
+        }
+        row.removeFromLeft (8);
+        drumRoutes[(size_t) d].setBounds (row.removeFromLeft (routeW).reduced (0, 5));
+    }
+    const int gridX = inner.getX() + nameW + 6 + 4 * knobW + 8 + routeW + 14;
+    drumGrid.setBounds (gridX, inner.getY(), inner.getRight() - gridX, rowH * Drums::numDrums);
 }
 
 void SNSynthEditor::resized()
@@ -667,6 +814,12 @@ void SNSynthEditor::layoutContent()
     modListBounds = row3;
     modList.setBounds (row3.reduced (6).withTrimmedTop (22));
 
+    // Row 5: drum machine
+    area.removeFromTop (gap);
+    auto drumRow = area.removeFromTop (224);
+    rule (drumRow);
+    layoutDrums (drumRow);
+
     area.removeFromTop (gap);
     rule (area);
     auto bottom = area;
@@ -708,7 +861,7 @@ void SNSynthEditor::updateHint()
     }
     else
     {
-        hintLabel.setText ("Computer keyboard (FL Studio layout): Z S X D C V ... lower octave, Q 2 W 3 E R ... upper octave.",
+        hintLabel.setText ("Computer keyboard (FL Studio layout): Z S X D C V ... lower octave, Q 2 W 3 E R ... upper octave. Space starts and stops the drums.",
                            juce::dontSendNotification);
         hintLabel.setColour (juce::Label::textColourId, dimText);
     }
@@ -1023,5 +1176,76 @@ void ChainStrip::mouseUp (const juce::MouseEvent&)
     if (dragFrom >= 0 && dropAt >= 0 && dropAt != dragFrom)
         processor.moveBlock (dragFrom, dropAt);
     dragFrom = dropAt = -1;
+    repaint();
+}
+
+//==============================================================================
+// Drum grid
+
+juce::Rectangle<float> DrumGrid::cellBounds (int drum, int step) const
+{
+    const float groupGap = 8.0f;
+    const float w = ((float) getWidth() - 3.0f * groupGap) / (float) Drums::numSteps;
+    const float h = (float) getHeight() / (float) Drums::numDrums;
+    return { (float) step * w + (float) (step / 4) * groupGap, (float) drum * h, w, h };
+}
+
+bool DrumGrid::cellAt (juce::Point<float> pos, int& drum, int& step) const
+{
+    for (int d = 0; d < Drums::numDrums; ++d)
+        for (int s = 0; s < Drums::numSteps; ++s)
+            if (cellBounds (d, s).contains (pos))
+            {
+                drum = d;
+                step = s;
+                return true;
+            }
+    return false;
+}
+
+void DrumGrid::paint (juce::Graphics& g)
+{
+    const int playing = processor.drumStep.load();
+    for (int s = 0; s < Drums::numSteps; ++s)
+    {
+        if (s == playing)
+        {
+            auto col = cellBounds (0, s).withBottom ((float) getHeight());
+            g.setColour (Theme::accent.withAlpha (0.18f));
+            g.fillRect (col.reduced (1.0f, 0.0f));
+        }
+        for (int d = 0; d < Drums::numDrums; ++d)
+        {
+            auto cell = cellBounds (d, s).reduced (2.5f, 4.0f);
+            const bool on = processor.drumPattern.get (d, s);
+            if (on)
+                g.setColour (s == playing ? Theme::accent : Theme::ink);
+            else
+                g.setColour (s % 4 == 0 ? Theme::grid.darker (0.06f) : Theme::screen);
+            g.fillRect (cell);
+        }
+    }
+}
+
+void DrumGrid::mouseDown (const juce::MouseEvent& e)
+{
+    int d, s;
+    if (! cellAt (e.position, d, s))
+        return;
+    paintOn = ! processor.drumPattern.get (d, s);
+    processor.drumPattern.set (d, s, paintOn);
+    lastDrum = d;
+    lastStep = s;
+    repaint();
+}
+
+void DrumGrid::mouseDrag (const juce::MouseEvent& e)
+{
+    int d, s;
+    if (! cellAt (e.position, d, s) || (d == lastDrum && s == lastStep))
+        return;
+    processor.drumPattern.set (d, s, paintOn);
+    lastDrum = d;
+    lastStep = s;
     repaint();
 }

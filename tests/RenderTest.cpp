@@ -3,6 +3,7 @@
 #include "PluginProcessor.h"
 #include "Parameters.h"
 #include "Filters.h"
+#include "Drums.h"
 #include "Envelope.h"
 #include "PluginEditor.h"
 #include <cmath>
@@ -89,6 +90,9 @@ static int saveSnapshot (const juce::File& file)
     setParam (*p, ParamIDs::osc2Sine, 60);
     setParam (*p, ParamIDs::osc2Saw, 30);
     setParam (*p, ParamIDs::fm1to2, 25);
+    setParam (*p, ParamIDs::drumPlay, 1);
+    setParam (*p, ParamIDs::drum (Drums::hat, ParamIDs::drumRoute), 2);
+    setParam (*p, ParamIDs::drumSwing, 20);
 
     std::unique_ptr<juce::AudioProcessorEditor> editor (p->createEditor());
     if (auto* ed = dynamic_cast<SNSynthEditor*> (editor.get()))
@@ -120,6 +124,29 @@ int main (int argc, char** argv)
 {
     juce::ScopedJuceInitialiser_GUI juceInit;
     const double sr = 48000.0;
+
+    // A short audio demo of the drum machine: 2 bars straight, 2 bars with swing.
+    if (argc > 2 && juce::String (argv[1]) == "--drumdemo")
+    {
+        auto p = makeSynth (sr);
+        setParam (*p, ParamIDs::drumPlay, 1.0f);
+        const int bar = (int) (sr * 2.0), block = 512;
+        juce::AudioBuffer<float> out (2, bar * 4), buf (2, block);
+        for (int pos = 0; pos < out.getNumSamples(); pos += block)
+        {
+            if (pos >= bar * 2) setParam (*p, ParamIDs::drumSwing, 45.0f);
+            juce::MidiBuffer midi;
+            p->processBlock (buf, midi);
+            const int len = juce::jmin (block, out.getNumSamples() - pos);
+            for (int ch = 0; ch < 2; ++ch) out.copyFrom (ch, pos, buf, ch, 0, len);
+        }
+        const juce::File f { juce::String (argv[2]) };
+        f.deleteFile();
+        juce::WavAudioFormat wav;
+        std::unique_ptr<juce::AudioFormatWriter> w (wav.createWriterFor (new juce::FileOutputStream (f), sr, 2, 16, {}, 0));
+        w->writeFromAudioSampleBuffer (out, 0, out.getNumSamples());
+        return 0;
+    }
 
     if (argc > 2 && juce::String (argv[1]) == "--snapshot")
         return saveSnapshot (juce::File (juce::String (argv[2])));
@@ -356,7 +383,7 @@ int main (int argc, char** argv)
     {
         auto p = makeSynth (sr);
         const int total = (int) p->getParameters().size();
-        check (total == 67, "Synth has 67 controls (found " + juce::String (total) + ")");
+        check (total == 95, "Synth has 95 controls (found " + juce::String (total) + ")");
 
         bool ok = std::abs (paramValue (*p, sid (0, ParamIDs::slotType)) - FilterType::ota) < 0.01f
                && std::abs (paramValue (*p, sid (1, ParamIDs::slotType)) - FilterType::off) < 0.01f
@@ -970,6 +997,141 @@ int main (int argc, char** argv)
         const int plain = pulses (false, false), crossed = pulses (true, false), self = pulses (false, true);
         check (crossed > plain + 4, "LFO 1 > LFO 2 Rate speeds LFO 2 up and down (" + juce::String (plain) + " vs " + juce::String (crossed) + " edges)");
         check (self >= 0 && self != plain, "LFO 2 can modulate its own Rate and stays stable (" + juce::String (self) + " edges)");
+    }
+
+    // Drum machine
+    {
+        auto renderSilent = [] (SNSynthProcessor& p, int numSamples)
+        {
+            const int blockSize = 512;
+            juce::AudioBuffer<float> out (2, numSamples);
+            juce::AudioBuffer<float> block (2, blockSize);
+            for (int pos = 0; pos < numSamples; pos += blockSize)
+            {
+                juce::MidiBuffer midi;
+                p.processBlock (block, midi);
+                out.copyFrom (0, pos, block, 0, 0, juce::jmin (blockSize, numSamples - pos));
+                out.copyFrom (1, pos, block, 1, 0, juce::jmin (blockSize, numSamples - pos));
+            }
+            return out;
+        };
+        auto onlyStep = [] (SNSynthProcessor& p, int drum, std::initializer_list<int> steps)
+        {
+            for (int d = 0; d < Drums::numDrums; ++d)
+                for (int s = 0; s < Drums::numSteps; ++s)
+                    p.drumPattern.set (d, s, false);
+            for (int s : steps)
+                p.drumPattern.set (drum, s, true);
+        };
+        auto firstAbove = [] (const juce::AudioBuffer<float>& b, int from, float threshold)
+        {
+            for (int i = from; i < b.getNumSamples(); ++i)
+                if (std::abs (b.getSample (0, i)) > threshold)
+                    return i;
+            return -1;
+        };
+        const int stepLen = (int) (sr * 60.0 / 120.0 / 4.0); // one 16th at 120 BPM
+
+        // Every drum makes a sound, and stays well-behaved.
+        {
+            juce::StringArray quiet;
+            bool allFinite = true;
+            float loudest = 0.0f;
+            for (int d = 0; d < Drums::numDrums; ++d)
+            {
+                auto p = makeSynth (sr);
+                p->auditionDrum (d);
+                auto out = renderSilent (*p, (int) sr);
+                const float peak = out.getMagnitude (0, 0, out.getNumSamples());
+                loudest = juce::jmax (loudest, peak);
+                std::cout << "      " << Drums::drumName (d) << " peak " << juce::Decibels::gainToDecibels (peak) << " dB" << std::endl;
+                if (peak < 0.02f) quiet.add (Drums::drumName (d));
+                for (int i = 0; i < out.getNumSamples(); ++i)
+                    allFinite = allFinite && std::isfinite (out.getSample (0, i));
+                check (out.getMagnitude (0, (int) sr - 4800, 4800) < 1.0e-3f,
+                       juce::String (Drums::drumName (d)) + " dies away within a second at default Decay");
+            }
+            check (quiet.isEmpty() && allFinite, "All five drums make a sound (quiet: " + quiet.joinIntoString (", ") + ")");
+            check (loudest < 0.6f, "A single drum hit leaves headroom at default settings (peak " + juce::String (juce::Decibels::gainToDecibels (loudest), 1) + " dB)");
+        }
+
+        // Stopped: silence.
+        {
+            auto p = makeSynth (sr);
+            auto out = renderSilent (*p, (int) sr);
+            check (out.getMagnitude (0, 0, out.getNumSamples()) < 1.0e-6f, "Drums are silent until Play is pressed");
+        }
+
+        // Timing at 120 BPM: kick on steps 0 and 8 lands on 0 and exactly 8 sixteenths later.
+        {
+            auto p = makeSynth (sr);
+            onlyStep (*p, Drums::kick, { 0, 8 });
+            setParam (*p, ParamIDs::drumPlay, 1.0f);
+            auto out = renderSilent (*p, (int) (sr * 1.5));
+            const int first = firstAbove (out, 0, 0.01f);
+            const int second = firstAbove (out, 8 * stepLen - 100, 0.01f);
+            check (first >= 0 && first < 64 && std::abs (second - 8 * stepLen) < 64,
+                   "Kick on steps 1 and 9 plays on time at 120 BPM (at " + juce::String (first) + " and " + juce::String (second) + " samples)");
+        }
+
+        // Swing pushes the off-beat 16ths later (100% = half a step).
+        {
+            auto p = makeSynth (sr);
+            onlyStep (*p, Drums::rim, { 1 });
+            setParam (*p, ParamIDs::drumSwing, 100.0f);
+            setParam (*p, ParamIDs::drumPlay, 1.0f);
+            auto out = renderSilent (*p, (int) sr);
+            const int at = firstAbove (out, 0, 0.01f);
+            const int expected = stepLen + stepLen / 2;
+            check (std::abs (at - expected) < 64, "Swing 100% moves step 2 half a step later (at " + juce::String (at) + ", expected " + juce::String (expected) + ")");
+        }
+
+        // Routing: a hat sent into Filter 1 set dark is much quieter than dry.
+        {
+            auto hatLevel = [&] (int route)
+            {
+                auto p = makeSynth (sr);
+                setParam (*p, ParamIDs::slot (0, ParamIDs::slotCutoff), 150.0f);
+                setParam (*p, ParamIDs::drum (Drums::hat, ParamIDs::drumRoute), (float) route);
+                p->auditionDrum (Drums::hat);
+                auto out = renderSilent (*p, (int) (sr * 0.3));
+                return out.getRMSLevel (0, 0, out.getNumSamples());
+            };
+            const float dry = hatLevel (Drums::dry), filtered = hatLevel (Drums::toFilter1);
+            check (dry > 0.005f && filtered < dry * 0.2f, "Hat routed into Filter 1 goes through it (dry " + juce::String (dry, 4) + ", filtered " + juce::String (filtered, 4) + ")");
+        }
+
+        // The pattern is saved with the project.
+        {
+            auto p = makeSynth (sr);
+            onlyStep (*p, Drums::clap, { 3, 11 });
+            juce::MemoryBlock state;
+            p->getStateInformation (state);
+            auto q = makeSynth (sr);
+            q->setStateInformation (state.getData(), (int) state.getSize());
+            bool same = true;
+            for (int d = 0; d < Drums::numDrums; ++d)
+                for (int st = 0; st < Drums::numSteps; ++st)
+                    same = same && p->drumPattern.get (d, st) == q->drumPattern.get (d, st);
+            check (same && q->drumPattern.get (Drums::clap, 11), "Drum pattern saves and reloads");
+        }
+
+        // Everything at once (all drums, every step, full level, chord) stays under the ceiling.
+        {
+            auto p = makeSynth (sr);
+            for (int d = 0; d < Drums::numDrums; ++d)
+            {
+                for (int st = 0; st < Drums::numSteps; ++st)
+                    p->drumPattern.set (d, st, true);
+                setParam (*p, ParamIDs::drum (d, ParamIDs::drumLevel), 100.0f);
+            }
+            setParam (*p, ParamIDs::volume, 6.0f);
+            setParam (*p, ParamIDs::limiter, 0.0f);
+            setParam (*p, ParamIDs::drumPlay, 1.0f);
+            auto out = render (*p, 60, 200, false);
+            const float peak = out.getMagnitude (0, 0, out.getNumSamples());
+            check (peak <= 0.9661f, "Drums flat out with the Limiter off stay under -0.3 dB (peak " + juce::String (juce::Decibels::gainToDecibels (peak), 2) + " dB)");
+        }
     }
 
     std::cout << (failures == 0 ? "All checks passed" : juce::String (failures) + " check(s) failed") << std::endl;

@@ -51,6 +51,13 @@ public:
     void setChainOrder (std::array<int, Chain::numBlocks> order);
     void moveBlock (int position, int newPosition); // take the block at position and put it at newPosition
 
+    // Drum machine: the 16-step pattern (the screen edits it), the step
+    // playing now (-1 when stopped), and a way to hear one drum straight away.
+    Drums::Pattern drumPattern;
+    std::atomic<int> drumStep { -1 };
+    std::array<std::atomic<float>, Drums::numDrums> drumHitLevel {}; // set on each hit, faded by the screen
+    void auditionDrum (int d) { auditionMask.fetch_or (1u << d); }
+
     // Just the filters, in the order they run.
     std::array<int, 3> getSlotOrder() const;
     void setSlotOrder (std::array<int, 3> order);
@@ -61,6 +68,8 @@ private:
     void renderLfo (int numSamples);
     float globalVolumeDb (int pos);
     void applySlotOrderFromState();
+    void renderDrums (int numSamples);
+    void hitDrum (int d);
 
     struct SlotParams { std::atomic<float> *type, *cutoff, *res, *drive, *env, *character; };
     std::array<SlotParams, 3> slotParams {};
@@ -82,6 +91,20 @@ private:
     static constexpr float limiterCeiling = 0.966f; // -0.3 dB
     std::array<std::vector<float>, 1 + Chain::numBlocks> tapBuffers; // oscillators, then after each chain position
     double currentSampleRate = 44100.0;
+
+    // Drums
+    struct DrumParams { std::atomic<float> *tune, *decay, *tone, *level, *route; };
+    std::array<DrumParams, Drums::numDrums> drumParams {};
+    std::array<Drums::DrumSettings, Drums::numDrums> drumSettings {};
+    std::array<Drums::Voice, Drums::numDrums> drumVoices;
+    Drums::Sequencer sequencer;
+    std::array<FilterSlot, 3> drumFilters;   // the drums' own copy of each filter slot
+    VoiceEq drumEq;
+    VoiceSettings drumCur;                   // filter and EQ settings for the drums, with LFO modulation
+    std::array<std::vector<float>, Drums::numRoutes> drumBus; // dry, into Filter 1, 2, 3
+    std::vector<float> drumOut;
+    std::atomic<uint32_t> auditionMask { 0 };
+    static constexpr float drumGain = 0.4f;
     std::unique_ptr<OutputFollower> outputFollower; // standalone app: follow the Mac's system output
 
     std::atomic<float>* volumeParam = nullptr;

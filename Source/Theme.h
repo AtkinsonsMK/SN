@@ -92,7 +92,8 @@ namespace Theme
         void drawRotarySlider (juce::Graphics& g, int x, int y, int w, int h, float pos,
                                float start, float end, juce::Slider& s) override
         {
-            auto bounds = juce::Rectangle<int> (x, y, w, h).toFloat().reduced (10.0f);
+            auto bounds = juce::Rectangle<int> (x, y, w, h).toFloat();
+            bounds = bounds.reduced (juce::jmin (10.0f, juce::jmin (bounds.getWidth(), bounds.getHeight()) * 0.1f));
             const float radius = juce::jmin (bounds.getWidth(), bounds.getHeight()) * 0.5f * 0.82f;
             const auto c = bounds.getCentre();
             const float angle = start + pos * (end - start);
