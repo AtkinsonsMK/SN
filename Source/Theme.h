@@ -155,7 +155,7 @@ namespace Theme
             auto r = juce::Rectangle<float> (0.0f, 0.0f, (float) w, (float) h).reduced (0.5f);
             g.setColour (screen);
             g.fillRect (r);
-            const float ax = (float) w - 16.0f, ay = (float) h * 0.5f;
+            const float ax = (float) w - (w < 80 ? 8.0f : 16.0f), ay = (float) h * 0.5f;
             juce::Path arrow;
             arrow.startNewSubPath (ax - 4.0f, ay - 2.0f);
             arrow.lineTo (ax, ay + 2.0f);
@@ -169,7 +169,9 @@ namespace Theme
 
         void positionComboBoxText (juce::ComboBox& box, juce::Label& l) override
         {
-            l.setBounds (8, 1, box.getWidth() - 28, box.getHeight() - 2);
+            // Narrow boxes (the drum Route menus) give the text more room.
+            const bool narrow = box.getWidth() < 80;
+            l.setBounds (narrow ? 2 : 8, 1, box.getWidth() - (narrow ? 16 : 28), box.getHeight() - 2);
             l.setFont (getComboBoxFont (box));
         }
 

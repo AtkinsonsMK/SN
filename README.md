@@ -96,7 +96,7 @@ document.
 | Output | Volume | -inf to +6 dB | -6 dB |
 | | Limiter (keeps peaks just under 0 dB, smoothly) | on / off | on |
 | | Voice Gain Comp (turns chords down so they don't jump in level) | on / off | on |
-| | Filter oversampling (filters run 1, 2 or 4 times faster inside: cleaner at high resonance/drive, more CPU) | 1x, 2x, 4x | 2x |
+| | Filter oversampling (filters run 1, 2 or 4 times faster inside: cleaner at high resonance/drive, more CPU; the treble stays flat to 20 kHz at every setting) | 1x, 2x, 4x | 2x |
 | Drums | Play (start/stop; Space does the same) | on / off | off |
 | | Tempo (standalone app; in a DAW the DAW's tempo is used) | 60 to 200 BPM | 120 BPM |
 | | Swing (pushes every second 16th later, for a shuffle) | 0 to 100% (100% = half a step) | 0% |
@@ -104,7 +104,9 @@ document.
 | | Decay (how long it rings; Hat goes from closed to open) | 0 to 100% | 50% |
 | | Tone (Kick: click and punch; Snare: snap; Clap and Hat: brightness; Rim: ring) | 0 to 100% | 50% |
 | | Level | 0 to 100% | 80% |
-| | Route (where it goes: Dry = straight out, or into Filter 1, 2 or 3 and on through the rest of the chain) | Dry, Filter 1, 2, 3 | Dry |
+| | Route (where it goes: Dry = straight out, or F1/F2/F3 = into Filter 1, 2 or 3 and on through the rest of the chain) | Dry, F1, F2, F3 | Dry |
+
+**Smoothness:** every knob, automation move and modulation glides over about 5 ms, so sweeps (even with lots of resonance) don't step or click.
 
 **Safety:** whatever the settings, nothing leaves the synth above -0.3 dB. With the Limiter off, loud peaks are clipped flat instead (the CLIP light shows when that happens).
 
@@ -123,18 +125,19 @@ The **Modulation** panel lists every connection with its amount; click × to rem
 
 The **output meter** next to Volume shows the level in dB: the solid bar is the average, the thin line is the peak, and the white line holds the recent peak. The **CLIP** light turns red if the sound goes over 0 dB and stays on until you click it.
 
-The panel scales: it opens at a size that fits your screen, and you can drag the bottom-right corner to resize it.
+The panel is laid out in three columns: the synth itself (oscillators, signal chain, filters, amp, EQ, output) on the left, what moves the sound (LFOs, filter envelope, modulation list) in the middle, and the drum machine on the right, with the keyboard along the bottom. It scales: it opens at a size that fits your screen, and you can drag the bottom-right corner to resize it.
 
 ## Drums
 
-A small drum machine for jamming, at the bottom of the panel. All five drums
+A small drum machine for jamming, in the right-hand column of the panel. All five drums
 are synthesised (no samples), built the analogue way: the Kick is a sine wave
 whose pitch drops fast; the Snare is two sine tones plus filtered noise; the
 Clap is three quick bursts of noise then a tail; the Hat is six clashing
 square waves, high-passed to a metallic sizzle; the Rim is a short high ping.
 
 - Click a square in the grid to turn that step on or off (drag to paint several).
-  The 16 steps are one bar of 16th notes; the numbers mark the beats.
+  Each drum has a column; the 16 steps run down the page (one bar of 16th
+  notes, with a gap after each beat).
 - Click a drum's name to hear it.
 - **Play** (or Space) starts and stops. In a DAW the drums follow the DAW's
   play button and tempo instead.

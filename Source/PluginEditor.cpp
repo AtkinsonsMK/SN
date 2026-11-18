@@ -589,22 +589,21 @@ void SNSynthEditor::paintContent (juce::Graphics& g)
         g.drawText (group->title, r.reduced (10, 0).withTrimmedTop (6).removeFromTop (16), juce::Justification::centredLeft);
     }
 
-    // Drum column headings
+    // Drum row names beside the knobs, and step numbers beside the grid.
     {
-        auto h = drumHeaderRow;
         g.setColour (dimText);
         g.setFont (Theme::label (11.5f));
-        h.removeFromLeft (64 + 6);
-        for (auto* name : { "Tune", "Decay", "Tone", "Level" })
-            g.drawText (name, h.removeFromLeft (40), juce::Justification::centred);
-        h.removeFromLeft (8);
-        g.drawText ("Route", h.removeFromLeft (92), juce::Justification::centredLeft);
-        const auto grid = drumGrid.getBounds();
-        for (int s = 0; s < Drums::numSteps; s += 4)
+        auto rows = drumControlRows.withTrimmedTop (26);
+        for (auto* name : { "Tune", "Decay", "Tone", "Level", "Route" })
+            g.drawText (name, rows.removeFromTop (name[1] == 'o' && name[2] == 'u' ? 30 : 38), juce::Justification::centredLeft);
+        const auto grid = drumGrid.getBounds().toFloat();
+        for (int st = 0; st < Drums::numSteps; ++st)
         {
-            const auto cell = drumGrid.cellBounds (0, s).translated ((float) grid.getX(), 0.0f);
-            g.drawText (juce::String (s + 1), juce::Rectangle<float> (cell.getX(), (float) h.getY(), 30.0f, (float) h.getHeight()),
-                        juce::Justification::centredLeft);
+            const auto cell = drumGrid.cellBounds (0, st).translated (grid.getX(), grid.getY());
+            g.setColour (st % 4 == 0 ? text : dimText);
+            g.drawText (juce::String (st + 1), juce::Rectangle<float> ((float) drumLabelColumn.getX(), cell.getY(),
+                                                                   (float) drumLabelColumn.getWidth() - 8.0f, cell.getHeight()),
+                        juce::Justification::centredRight);
         }
     }
 }
@@ -655,7 +654,7 @@ void SNSynthEditor::setupDrums()
         }
 
         auto& route = drumRoutes[(size_t) d];
-        route.addItemList ({ "Dry", "Filter 1", "Filter 2", "Filter 3" }, 1);
+        route.addItemList ({ "Dry", "F1", "F2", "F3" }, 1); // Dry, or into Filter 1, 2 or 3
         route.setWantsKeyboardFocus (false);
         route.setColour (juce::ComboBox::backgroundColourId, background);
         route.setTooltip ("Where this drum goes: straight to the output (Dry), or into a filter and on through "
@@ -670,40 +669,41 @@ void SNSynthEditor::setupDrums()
 void SNSynthEditor::layoutDrums (juce::Rectangle<int> area)
 {
     drumBounds = area;
-    auto inner = area.reduced (6).withTrimmedTop (22);
+    auto inner = area.reduced (6).withTrimmedTop (24);
 
-    // Transport: Play, Tempo, Swing
-    auto transport = inner.removeFromLeft (150);
-    drumPlayButton.setBounds (transport.removeFromTop (30).reduced (4, 0));
-    transport.removeFromTop (8);
+    // Transport: Play, then Tempo and Swing.
+    auto transport = inner.removeFromTop (138);
+    auto playArea = transport.removeFromLeft (110);
+    drumPlayButton.setBounds (playArea.removeFromTop (30));
     for (auto* k : { drumTempoKnob, drumSwingKnob })
     {
-        auto cell = transport.removeFromLeft (75);
+        auto cell = transport.removeFromLeft (transport.getWidth() / (k == drumTempoKnob ? 2 : 1));
         k->label.setBounds (cell.removeFromTop (16));
-        k->slider.setBounds (cell.removeFromTop (96).reduced (4, 0));
+        k->slider.setBounds (cell.removeFromTop (110).reduced (4, 0));
     }
-    inner.removeFromLeft (16);
+    inner.removeFromTop (8);
 
-    // Column headings, then one row per drum.
-    drumHeaderRow = inner.removeFromTop (16);
-    const int rowH = (inner.getHeight()) / Drums::numDrums;
-    const int nameW = 64, knobW = 40, routeW = 92;
-    auto rows = inner;
+    // One column per drum: name, then Tune, Decay, Tone, Level, Route
+    // (row names on the left), then that drum's 16 steps below.
+    drumLabelColumn = inner.removeFromLeft (46);
+    const int colW = inner.getWidth() / Drums::numDrums;
+    const int knobH = 38;
+    auto controls = inner.removeFromTop (26 + 4 * knobH + 30);
+    drumControlRows = controls.withX (drumLabelColumn.getX()).withWidth (drumLabelColumn.getWidth());
     for (int d = 0; d < Drums::numDrums; ++d)
     {
-        auto row = rows.removeFromTop (rowH);
-        drumNames[(size_t) d].setBounds (row.removeFromLeft (nameW).reduced (0, 4));
-        row.removeFromLeft (6);
+        auto col = controls.removeFromLeft (colW).reduced (2, 0);
+        drumNames[(size_t) d].setBounds (col.removeFromTop (24));
+        col.removeFromTop (2);
         for (auto* k : drumKnobs[(size_t) d])
         {
-            k->slider.setBounds (row.removeFromLeft (knobW).reduced (1, 0));
+            k->slider.setBounds (col.removeFromTop (knobH));
             if (k->ring != nullptr) k->ring->setBounds (k->slider.getBounds());
         }
-        row.removeFromLeft (8);
-        drumRoutes[(size_t) d].setBounds (row.removeFromLeft (routeW).reduced (0, 5));
+        drumRoutes[(size_t) d].setBounds (col.removeFromTop (30).reduced (0, 4));
     }
-    const int gridX = inner.getX() + nameW + 6 + 4 * knobW + 8 + routeW + 14;
-    drumGrid.setBounds (gridX, inner.getY(), inner.getRight() - gridX, rowH * Drums::numDrums);
+    inner.removeFromTop (10);
+    drumGrid.setBounds (inner.withHeight (juce::jmin (inner.getHeight(), 16 * 26 + 3 * 8)).withWidth (colW * Drums::numDrums));
 }
 
 void SNSynthEditor::resized()
@@ -723,7 +723,7 @@ void SNSynthEditor::layoutContent()
 
     // Header: modulation sources
     {
-        juce::Rectangle<int> strip (180, 26, 720, 24);
+        juce::Rectangle<int> strip (180, 26, 760, 24);
         modulateLabel.setBounds (strip.removeFromLeft (108));
         strip.removeFromLeft (6);
         const int w = strip.getWidth() / Mod::numSources;
@@ -733,96 +733,108 @@ void SNSynthEditor::layoutContent()
 
     const int rowH = 180, gap = 16;
     dividers.clear();
-    auto rule = [this] (juce::Rectangle<int> rowArea) // full-width line above a row
+    auto hRule = [this] (juce::Rectangle<int> r) // line above a panel, across its column
     {
-        dividers.push_back (juce::Rectangle<int> (rowArea.getX(), rowArea.getY() - gap / 2, rowArea.getWidth(), 1));
+        dividers.push_back (juce::Rectangle<int> (r.getX(), r.getY() - gap / 2, r.getWidth(), 1));
     };
-    auto split = [this] (juce::Rectangle<int>& row) // vertical line between panels
+    auto vRule = [this] (juce::Rectangle<int>& r) // line between side-by-side panels
     {
-        dividers.push_back (juce::Rectangle<int> (row.getX() + gap / 2, row.getY(), 1, row.getHeight()));
-        row.removeFromLeft (gap);
+        dividers.push_back (juce::Rectangle<int> (r.getX() + gap / 2, r.getY(), 1, r.getHeight()));
+        r.removeFromLeft (gap);
     };
 
-    // Row 1: sound sources
+    // The keyboard runs along the bottom, under all three columns.
+    auto bottom = area.removeFromBottom (150);
+    area.removeFromBottom (gap);
+    hRule (bottom);
+
     area.removeFromTop (gap / 2);
-    auto row1 = area.removeFromTop (rowH);
-    rule (row1);
-    const int unit1 = (row1.getWidth() - 2 * gap) / 17;
-    auto r1 = row1;
-    layoutGroup (oscGroup,  r1.removeFromLeft (unit1 * 7)); split (r1);
-    layoutGroup (osc2Group, r1.removeFromLeft (unit1 * 7)); split (r1);
-    layoutGroup (playGroup, r1);
 
-    // Row 2: mix, amp envelope, EQ and output
-    area.removeFromTop (gap);
-    auto row2a = area.removeFromTop (rowH);
-    rule (row2a);
-    const int outW = 250;
-    const int unit = (row2a.getWidth() - outW - 3 * gap) / 14;
-    layoutGroup (mixGroup,    row2a.removeFromLeft (unit * 7)); split (row2a);
-    layoutGroup (ampEnvGroup, row2a.removeFromLeft (unit * 4)); split (row2a);
-    layoutGroup (eqGroup,     row2a.removeFromLeft (unit * 3)); split (row2a);
-    auto out = row2a;
-    outputGroup.bounds = out;
+    // Three columns: the synth, then modulation, then the drums.
+    auto colA = area.removeFromLeft (colAWidth);
+    vRule (area);
+    auto colB = area.removeFromLeft (colBWidth);
+    vRule (area);
+    auto colC = area;
+
+    // Column A: the synth itself, top to bottom in signal order.
     {
-        auto inner = out.reduced (6).withTrimmedTop (22);
-        auto knobArea = inner.removeFromLeft (76);
-        auto* vol = outputGroup.knobs[0];
-        vol->label.setBounds (knobArea.removeFromTop (16));
-        vol->slider.setBounds (knobArea.removeFromTop (100).reduced (2, 0));
-        if (vol->ring != nullptr) vol->ring->setBounds (vol->slider.getBounds());
-        outputMeter.setBounds (inner.removeFromLeft (78).reduced (4, 0));
-        inner.removeFromLeft (6);
-        limiterButton.setBounds (inner.removeFromTop (24));
-        voiceCompButton.setBounds (inner.removeFromTop (24));
-        inner.removeFromTop (10);
-        oversamplingLabel.setBounds (inner.removeFromTop (18));
-        oversamplingBox.setBounds (inner.removeFromTop (24).withWidth (70));
+        auto row1 = colA.removeFromTop (rowH);
+        hRule (row1);
+        const int half = (row1.getWidth() - gap) / 2;
+        layoutGroup (oscGroup,  row1.removeFromLeft (half)); vRule (row1);
+        layoutGroup (osc2Group, row1);
+
+        colA.removeFromTop (gap);
+        auto row2 = colA.removeFromTop (rowH);
+        hRule (row2);
+        const int unit = (row2.getWidth() - 2 * gap) / 14;
+        layoutGroup (mixGroup,    row2.removeFromLeft (unit * 7)); vRule (row2);
+        layoutGroup (ampEnvGroup, row2.removeFromLeft (unit * 4)); vRule (row2);
+        layoutGroup (eqGroup,     row2);
+
+        colA.removeFromTop (gap);
+        chainBounds = colA.removeFromTop (64);
+        hRule (chainBounds);
+        chainStrip.setBounds (chainBounds.reduced (10, 0).withTrimmedTop (26).withHeight (34));
+
+        colA.removeFromTop (gap);
+        auto row3 = colA.removeFromTop (rowH + 26);
+        hRule (row3);
+        const int slotW = (row3.getWidth() - 2 * gap) / 3;
+        for (int i = 0; i < 3; ++i)
+        {
+            auto& sp = slots[(size_t) i];
+            auto b = i < 2 ? row3.removeFromLeft (slotW) : row3;
+            if (i < 2) vRule (row3);
+            layoutGroup (sp.group, b, 26);
+            auto header = b.reduced (8, 6).removeFromTop (20);
+            sp.levelMatch.setBounds (header.removeFromRight (70));
+            sp.type.setBounds (header.withY (header.getY() + 22).withHeight (22).withX (b.getX() + 8).withWidth (b.getWidth() - 16));
+        }
+
+        colA.removeFromTop (gap);
+        auto row4 = colA.removeFromTop (rowH);
+        hRule (row4);
+        auto out = row4.removeFromLeft (300);
+        vRule (row4);
+        layoutGroup (playGroup, row4.removeFromLeft (240));
+        outputGroup.bounds = out;
+        {
+            auto inner = out.reduced (6).withTrimmedTop (22);
+            auto knobArea = inner.removeFromLeft (76);
+            auto* vol = outputGroup.knobs[0];
+            vol->label.setBounds (knobArea.removeFromTop (16));
+            vol->slider.setBounds (knobArea.removeFromTop (100).reduced (2, 0));
+            if (vol->ring != nullptr) vol->ring->setBounds (vol->slider.getBounds());
+            outputMeter.setBounds (inner.removeFromLeft (78).reduced (4, 0));
+            inner.removeFromLeft (6);
+            limiterButton.setBounds (inner.removeFromTop (24));
+            voiceCompButton.setBounds (inner.removeFromTop (24));
+            inner.removeFromTop (10);
+            oversamplingLabel.setBounds (inner.removeFromTop (18));
+            oversamplingBox.setBounds (inner.removeFromTop (24).withWidth (70));
+        }
     }
 
-    // Signal chain: drag blocks to change the processing order.
-    area.removeFromTop (gap);
-    chainBounds = area.removeFromTop (64);
-    rule (chainBounds);
-    chainStrip.setBounds (chainBounds.reduced (10, 0).withTrimmedTop (26).withHeight (34));
-
-    // Row 3: the three filter slots
-    area.removeFromTop (gap);
-    auto row2 = area.removeFromTop (rowH + 26);
-    rule (row2);
-    const int slotW = (row2.getWidth() - 2 * gap) / 3;
-    for (int i = 0; i < 3; ++i)
+    // Column B: what moves the sound.
     {
-        auto& sp = slots[(size_t) i];
-        auto b = row2.removeFromLeft (slotW);
-        if (i < 2) split (row2);
-
-        layoutGroup (sp.group, b, 26);
-        auto header = b.reduced (8, 6).removeFromTop (20);
-        sp.levelMatch.setBounds (header.removeFromRight (70));
-        sp.type.setBounds (header.withY (header.getY() + 22).withHeight (22).withX (b.getX() + 8).withWidth (b.getWidth() - 16));
+        for (auto* g : { &lfo1Group, &lfo2Group, &filterEnvGroup })
+        {
+            auto r = colB.removeFromTop (rowH);
+            hRule (r);
+            layoutGroup (*g, r);
+            colB.removeFromTop (gap);
+        }
+        hRule (colB);
+        modListBounds = colB;
+        modList.setBounds (colB.reduced (6).withTrimmedTop (22));
     }
 
-    // Row 4: movement: filter envelope, LFOs and the modulation list
-    area.removeFromTop (gap);
-    auto row3 = area.removeFromTop (rowH);
-    rule (row3);
-    const int knobW = 66;
-    layoutGroup (filterEnvGroup, row3.removeFromLeft (knobW * 4)); split (row3);
-    layoutGroup (lfo1Group,      row3.removeFromLeft (knobW * 3)); split (row3);
-    layoutGroup (lfo2Group,      row3.removeFromLeft (knobW * 3)); split (row3);
-    modListBounds = row3;
-    modList.setBounds (row3.reduced (6).withTrimmedTop (22));
+    // Column C: the drum machine.
+    hRule (colC);
+    layoutDrums (colC);
 
-    // Row 5: drum machine
-    area.removeFromTop (gap);
-    auto drumRow = area.removeFromTop (224);
-    rule (drumRow);
-    layoutDrums (drumRow);
-
-    area.removeFromTop (gap);
-    rule (area);
-    auto bottom = area;
     auto hintRow = bottom.removeFromTop (24);
     octaveUp.setBounds (hintRow.removeFromRight (26).reduced (0, 1));
     hintRow.removeFromRight (4);
@@ -831,6 +843,9 @@ void SNSynthEditor::layoutContent()
     octaveLabel.setBounds (hintRow.removeFromRight (150));
     hintLabel.setBounds (hintRow);
     keyboard.setBounds (bottom.withTrimmedTop (4));
+    // Fill the whole width: 50 white keys from C1 to C8.
+    keyboard.setLowestVisibleKey (24);
+    keyboard.setKeyWidth ((float) keyboard.getWidth() / 50.0f);
 }
 
 //==============================================================================
@@ -1184,10 +1199,11 @@ void ChainStrip::mouseUp (const juce::MouseEvent&)
 
 juce::Rectangle<float> DrumGrid::cellBounds (int drum, int step) const
 {
+    // Steps run down the page, drums across; a small gap after every beat.
     const float groupGap = 8.0f;
-    const float w = ((float) getWidth() - 3.0f * groupGap) / (float) Drums::numSteps;
-    const float h = (float) getHeight() / (float) Drums::numDrums;
-    return { (float) step * w + (float) (step / 4) * groupGap, (float) drum * h, w, h };
+    const float h = ((float) getHeight() - 3.0f * groupGap) / (float) Drums::numSteps;
+    const float w = (float) getWidth() / (float) Drums::numDrums;
+    return { (float) drum * w, (float) step * h + (float) (step / 4) * groupGap, w, h };
 }
 
 bool DrumGrid::cellAt (juce::Point<float> pos, int& drum, int& step) const
@@ -1210,13 +1226,13 @@ void DrumGrid::paint (juce::Graphics& g)
     {
         if (s == playing)
         {
-            auto col = cellBounds (0, s).withBottom ((float) getHeight());
+            auto row = cellBounds (0, s).withRight ((float) getWidth());
             g.setColour (Theme::accent.withAlpha (0.18f));
-            g.fillRect (col.reduced (1.0f, 0.0f));
+            g.fillRect (row.reduced (0.0f, 1.0f));
         }
         for (int d = 0; d < Drums::numDrums; ++d)
         {
-            auto cell = cellBounds (d, s).reduced (2.5f, 4.0f);
+            auto cell = cellBounds (d, s).reduced (4.0f, 2.5f);
             const bool on = processor.drumPattern.get (d, s);
             if (on)
                 g.setColour (s == playing ? Theme::accent : Theme::ink);

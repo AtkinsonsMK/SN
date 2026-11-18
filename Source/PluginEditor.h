@@ -132,7 +132,8 @@ public:
     void resized() override;
 
     // The panel is laid out at this size and scaled to the window.
-    static constexpr int baseW = 1200, baseH = 1370;
+    static constexpr int baseW = 1640, baseH = 1130;
+    static constexpr int colAWidth = 940, colBWidth = 300;
 
     SNSynthProcessor& getProcessor() { return processor; }
     int getSelectedSource() const { return modSource; }
@@ -198,7 +199,7 @@ private:
     juce::Label modulateLabel;
     int modSource = -1; // the source being assigned, or -1
     ModList modList;
-    juce::Rectangle<int> modListBounds, chainBounds, drumBounds, drumHeaderRow;
+    juce::Rectangle<int> modListBounds, chainBounds, drumBounds, drumLabelColumn, drumControlRows;
 
     // Drum machine
     DrumGrid drumGrid { processor };
