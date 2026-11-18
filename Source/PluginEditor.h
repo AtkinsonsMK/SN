@@ -114,7 +114,7 @@ public:
     void resized() override;
 
     // The panel is laid out at this size and scaled to the window.
-    static constexpr int baseW = 1200, baseH = 1040;
+    static constexpr int baseW = 1200, baseH = 1130;
 
     SNSynthProcessor& getProcessor() { return processor; }
     int getSelectedSource() const { return modSource; }
@@ -180,7 +180,8 @@ private:
     juce::Label modulateLabel;
     int modSource = -1; // the source being assigned, or -1
     ModList modList;
-    juce::Rectangle<int> modListBounds;
+    juce::Rectangle<int> modListBounds, chainBounds;
+    std::vector<juce::Rectangle<int>> dividers;
     std::vector<ModRing*> rings;
     float matrixChecksum = 0.0f;
     juce::MidiKeyboardComponent keyboard;

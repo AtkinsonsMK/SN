@@ -537,12 +537,19 @@ void SNSynthEditor::paintContent (juce::Graphics& g)
                 header.withTrimmedRight (104), juce::Justification::centredRight);
 
     // Strict grid: each panel is a short ink bar and a flush-left title.
+    g.setColour (text.withAlpha (0.5f));
+    for (auto& d : dividers)
+        g.fillRect (d);
+
     KnobGroup modGroup;
     modGroup.title = "Modulation";
     modGroup.bounds = modListBounds;
+    KnobGroup chainGroup;
+    chainGroup.title = "Signal chain   (drag to reorder)";
+    chainGroup.bounds = chainBounds;
     for (auto* group : { &oscGroup, &osc2Group, &playGroup, &mixGroup, &filterEnvGroup, &ampEnvGroup,
                          &slots[0].group, &slots[1].group, &slots[2].group,
-                         &lfo1Group, &lfo2Group, &eqGroup, &outputGroup, &modGroup })
+                         &lfo1Group, &lfo2Group, &eqGroup, &outputGroup, &modGroup, &chainGroup })
     {
         auto r = group->bounds;
         g.setColour (text);
@@ -577,52 +584,38 @@ void SNSynthEditor::layoutContent()
             b.setBounds (strip.removeFromLeft (w).reduced (2, 0));
     }
 
-    const int rowH = 180, gap = 8;
+    const int rowH = 180, gap = 16;
+    dividers.clear();
+    auto rule = [this] (juce::Rectangle<int> rowArea) // full-width line above a row
+    {
+        dividers.push_back (juce::Rectangle<int> (rowArea.getX(), rowArea.getY() - gap / 2, rowArea.getWidth(), 1));
+    };
+    auto split = [this] (juce::Rectangle<int>& row) // vertical line between panels
+    {
+        dividers.push_back (juce::Rectangle<int> (row.getX() + gap / 2, row.getY(), 1, row.getHeight()));
+        row.removeFromLeft (gap);
+    };
 
-    // Row 1: the two oscillators and playing settings
+    // Row 1: sound sources
+    area.removeFromTop (gap / 2);
     auto row1 = area.removeFromTop (rowH);
+    rule (row1);
     const int unit1 = (row1.getWidth() - 2 * gap) / 17;
-    layoutGroup (oscGroup,  row1.removeFromLeft (unit1 * 7)); row1.removeFromLeft (gap);
-    layoutGroup (osc2Group, row1.removeFromLeft (unit1 * 7)); row1.removeFromLeft (gap);
-    layoutGroup (playGroup, row1);
+    auto r1 = row1;
+    layoutGroup (oscGroup,  r1.removeFromLeft (unit1 * 7)); split (r1);
+    layoutGroup (osc2Group, r1.removeFromLeft (unit1 * 7)); split (r1);
+    layoutGroup (playGroup, r1);
 
-    // Row 2: mix and voices, envelopes
+    // Row 2: mix, amp envelope, EQ and output
     area.removeFromTop (gap);
     auto row2a = area.removeFromTop (rowH);
-    const int unit = (row2a.getWidth() - 2 * gap) / 15;
-    layoutGroup (mixGroup,       row2a.removeFromLeft (unit * 7)); row2a.removeFromLeft (gap);
-    layoutGroup (filterEnvGroup, row2a.removeFromLeft (unit * 4)); row2a.removeFromLeft (gap);
-    layoutGroup (ampEnvGroup,    row2a);
-
-    // The chain: drag blocks to change the processing order.
-    area.removeFromTop (gap);
-    chainStrip.setBounds (area.removeFromTop (34));
-
-    // Row 3: the three filter slots
-    area.removeFromTop (gap);
-    auto row2 = area.removeFromTop (rowH + 26);
-    const int slotW = (row2.getWidth() - 2 * gap) / 3;
-    for (int i = 0; i < 3; ++i)
-    {
-        auto& sp = slots[(size_t) i];
-        auto b = row2.removeFromLeft (slotW);
-        if (i < 2) row2.removeFromLeft (gap);
-
-        layoutGroup (sp.group, b, 26);
-        auto header = b.reduced (8, 6).removeFromTop (20);
-        sp.levelMatch.setBounds (header.removeFromRight (70));
-        sp.type.setBounds (header.withY (header.getY() + 22).withHeight (22).withX (b.getX() + 8).withWidth (b.getWidth() - 16));
-    }
-
-    // Row 4: LFOs, EQ, output (Volume, meter, switches), modulation list
-    area.removeFromTop (gap);
-    auto row3 = area.removeFromTop (rowH);
-    const int knobW = 64;
-    layoutGroup (lfo1Group, row3.removeFromLeft (knobW * 3)); row3.removeFromLeft (gap);
-    layoutGroup (lfo2Group, row3.removeFromLeft (knobW * 3)); row3.removeFromLeft (gap);
-    layoutGroup (eqGroup,   row3.removeFromLeft (knobW * 3)); row3.removeFromLeft (gap);
-    auto out = row3.removeFromLeft (250);
-    row3.removeFromLeft (gap);
+    rule (row2a);
+    const int outW = 250;
+    const int unit = (row2a.getWidth() - outW - 3 * gap) / 14;
+    layoutGroup (mixGroup,    row2a.removeFromLeft (unit * 7)); split (row2a);
+    layoutGroup (ampEnvGroup, row2a.removeFromLeft (unit * 4)); split (row2a);
+    layoutGroup (eqGroup,     row2a.removeFromLeft (unit * 3)); split (row2a);
+    auto out = row2a;
     outputGroup.bounds = out;
     {
         auto inner = out.reduced (6).withTrimmedTop (22);
@@ -631,7 +624,7 @@ void SNSynthEditor::layoutContent()
         vol->label.setBounds (knobArea.removeFromTop (16));
         vol->slider.setBounds (knobArea.removeFromTop (100).reduced (2, 0));
         if (vol->ring != nullptr) vol->ring->setBounds (vol->slider.getBounds());
-        outputMeter.setBounds (inner.removeFromLeft (64).reduced (4, 0));
+        outputMeter.setBounds (inner.removeFromLeft (78).reduced (4, 0));
         inner.removeFromLeft (6);
         limiterButton.setBounds (inner.removeFromTop (24));
         voiceCompButton.setBounds (inner.removeFromTop (24));
@@ -639,10 +632,43 @@ void SNSynthEditor::layoutContent()
         oversamplingLabel.setBounds (inner.removeFromTop (18));
         oversamplingBox.setBounds (inner.removeFromTop (24).withWidth (70));
     }
+
+    // Signal chain: drag blocks to change the processing order.
+    area.removeFromTop (gap);
+    chainBounds = area.removeFromTop (64);
+    rule (chainBounds);
+    chainStrip.setBounds (chainBounds.reduced (10, 0).withTrimmedTop (26).withHeight (34));
+
+    // Row 3: the three filter slots
+    area.removeFromTop (gap);
+    auto row2 = area.removeFromTop (rowH + 26);
+    rule (row2);
+    const int slotW = (row2.getWidth() - 2 * gap) / 3;
+    for (int i = 0; i < 3; ++i)
+    {
+        auto& sp = slots[(size_t) i];
+        auto b = row2.removeFromLeft (slotW);
+        if (i < 2) split (row2);
+
+        layoutGroup (sp.group, b, 26);
+        auto header = b.reduced (8, 6).removeFromTop (20);
+        sp.levelMatch.setBounds (header.removeFromRight (70));
+        sp.type.setBounds (header.withY (header.getY() + 22).withHeight (22).withX (b.getX() + 8).withWidth (b.getWidth() - 16));
+    }
+
+    // Row 4: movement: filter envelope, LFOs and the modulation list
+    area.removeFromTop (gap);
+    auto row3 = area.removeFromTop (rowH);
+    rule (row3);
+    const int knobW = 66;
+    layoutGroup (filterEnvGroup, row3.removeFromLeft (knobW * 4)); split (row3);
+    layoutGroup (lfo1Group,      row3.removeFromLeft (knobW * 3)); split (row3);
+    layoutGroup (lfo2Group,      row3.removeFromLeft (knobW * 3)); split (row3);
     modListBounds = row3;
     modList.setBounds (row3.reduced (6).withTrimmedTop (22));
 
     area.removeFromTop (gap);
+    rule (area);
     auto bottom = area;
     auto hintRow = bottom.removeFromTop (24);
     octaveUp.setBounds (hintRow.removeFromRight (26).reduced (0, 1));
