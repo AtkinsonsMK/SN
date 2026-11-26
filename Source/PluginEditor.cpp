@@ -42,7 +42,8 @@ SNSynthEditor::SNSynthEditor (SNSynthProcessor& p)
 
     playGroup.title = "Playing";
     playGroup.knobs = { &makeKnob (velocityAmount, "Velocity"), &makeKnob (keyTracking, "Key Track"),
-                        &makeKnob (bendRange, "Bend Range") };
+                        &makeKnob (bendRange, "Bend Range"), &makeKnob (spread, "Spread"),
+                        &makeKnob (variation, "Variation"), &makeKnob (startPhase, "Start Phase") };
 
     filterEnvGroup.title = "Filter Envelope";
     filterEnvGroup.knobs = { &makeKnob (fenvAttack, "Attack"), &makeKnob (fenvDecay, "Decay"),
@@ -881,7 +882,7 @@ void SNSynthEditor::layoutContent()
         hRule (row4);
         auto out = row4.removeFromLeft (300);
         vRule (row4);
-        layoutGroup (playGroup, row4.removeFromLeft (240));
+        layoutGroup (playGroup, row4.removeFromLeft (juce::jmin (row4.getWidth(), 480)));
         outputGroup.bounds = out;
         {
             auto inner = out.reduced (6).withTrimmedTop (22);

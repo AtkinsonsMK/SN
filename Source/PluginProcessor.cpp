@@ -117,8 +117,13 @@ void SNSynthProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
     const int n = buffer.getNumSamples();
     repairBadParameterValues();
     modContext.invBlockLen = n > 0 ? 1.0f / (float) n : 0.0f;
-    rampFromLastBlock = true;
+    // Automation glides from the previous block's values. The first block
+    // after starting up or loading a project starts at the knobs as they are,
+    // instead of sweeping from the values before the load.
+    if (jumpToKnobs.exchange (false))
+        rampFromLastBlock = false;
     updateVoiceSettings();
+    rampFromLastBlock = true;
     // Mod wheel (MIDI CC 1), each move at its own sample.
     modContext.wheelAtStart = modContext.modWheel;
     modContext.numWheelEvents = 0;
@@ -319,6 +324,9 @@ void SNSynthProcessor::updateVoiceSettings()
     v.velocityAmount = p (ParamIDs::velocityAmount)->load() * 0.01f;
     v.keyTracking    = p (ParamIDs::keyTracking)->load() * 0.01f;
     v.bendRange      = p (ParamIDs::bendRange)->load();
+    v.spread         = juce::jlimit (0.0f, 1.0f, p (ParamIDs::spread)->load() * 0.01f);
+    v.variation      = juce::jlimit (0.0f, 1.0f, p (ParamIDs::variation)->load() * 0.01f);
+    v.randomPhase    = p (ParamIDs::startPhase)->load() > 0.5f;
     const int os     = 1 << juce::jlimit (0, 2, (int) p (ParamIDs::oversampling)->load());
 
     for (size_t i = 0; i < 3; ++i)
@@ -833,6 +841,7 @@ void SNSynthProcessor::getStateInformation (juce::MemoryBlock& destData)
 void SNSynthProcessor::setStateInformation (const void* data, int sizeInBytes)
 {
     ++uiStateEpoch; // the screen redraws everything after a load
+    jumpToKnobs.store (true); // the next block starts at the loaded knob positions, with no glide from the old ones
     if (auto xml = getXmlFromBinary (data, sizeInBytes))
         if (xml->hasTagName (parameters.state.getType()))
         {
@@ -854,6 +863,13 @@ void SNSynthProcessor::setStateInformation (const void* data, int sizeInBytes)
             else
                 drumPattern.setDefault();
             modMatrix.fromValueTree (parameters.state.getChildWithName ("MODULATION"));
+
+            // Saves from before Stereo Spread, Voice Variation and Start Phase
+            // existed were mono, identical voices and reset phase: keep them so.
+            if (loadedFormatVersion < 3)
+                for (auto* id : { ParamIDs::spread, ParamIDs::variation, ParamIDs::startPhase })
+                    if (auto* prm = parameters.getParameter (id))
+                        prm->setValueNotifyingHost (0.0f);
 
             // Projects from before modulation had one "LFO to Cutoff" knob for
             // all filters. Turn it into LFO 1 routings on each filter's Cutoff

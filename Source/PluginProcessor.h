@@ -100,6 +100,7 @@ private:
     SynthEngine synth { voiceSettings };
     float meterMeanSquare = 0.0f;
     bool rampFromLastBlock = false;
+    std::atomic<bool> jumpToKnobs { false }; // set when a project loads
     juce::uint64 gridClock = 0;          // samples since playback started (for the modulation grid)
     std::array<float, 2> lfoRateNow { 1.0f, 1.0f }, lfoCoefNow { 1.0f, 1.0f };
     bool lfoNeedsUpdate = true;

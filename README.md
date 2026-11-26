@@ -72,7 +72,7 @@ document.
 | | Decay | 1 ms to 10 s | 300 ms |
 | | Sustain | 0 to 100% | 100% |
 | | Release | 1 ms to 15 s | 200 ms |
-| Mix and Voices | Drift (slow random pitch wander per note) | 0 to 100% (up to about ±10 cents) | 15% |
+| Mix and Voices | Drift (slow random pitch wander; each oscillator of each note wanders on its own) | 0 to 100% (up to about ±10 cents) | 30% |
 | | Glide (slide between notes) | 0 to 2 s | 0 s |
 | Playing | Velocity (how much playing harder makes notes louder) | 0 to 100% | 50% |
 | | Key Track (how much filter cutoff follows the note you play) | 0 to 100% | 50% |
@@ -93,6 +93,9 @@ document.
 | EQ | Low (shelf 100 Hz) | -12 to +12 dB | 0 dB |
 | | Mid (bell 1 kHz) | -12 to +12 dB | 0 dB |
 | | High (shelf 8 kHz) | -12 to +12 dB | 0 dB |
+| Playing | Spread (stereo width: a note on its own sits in the middle, extra notes fan out left and right; notes below C3 and all bass below 150 Hz stay centred) | 0 to 100% | 50% |
+| | Variation (small fixed differences between voices, like a real polysynth's voice cards: tuning up to ±8 cents, cutoff ±0.3 octave, envelope times ±25%, level ±1 dB at 100%) | 0 to 100% | 25% |
+| | Start Phase (Reset: every note's wave starts at the same point, punchy and identical; Random: each note starts somewhere new, more natural) | Reset / Random | Random |
 | Output | Volume | -inf to +6 dB | -6 dB |
 | | Limiter (keeps peaks just under 0 dB, smoothly) | on / off | on |
 | | Voice Gain Comp (turns chords down so they don't jump in level) | on / off | on |

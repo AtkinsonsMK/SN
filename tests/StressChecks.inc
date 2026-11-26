@@ -112,6 +112,11 @@ namespace StressChecks
     {
         auto p = make (48000.0, 512);
         setParam (*p, ParamIDs::drift, 0);
+        // Recorded before Stereo Spread, Voice Variation and Start Phase: with
+        // them off, the sound must still match exactly.
+        setParam (*p, ParamIDs::spread, 0);
+        setParam (*p, ParamIDs::variation, 0);
+        setParam (*p, ParamIDs::startPhase, 0);
         rp.set (*p);
         std::vector<float> out;
         juce::AudioBuffer<float> buf (2, 512);

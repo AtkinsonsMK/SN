@@ -50,6 +50,11 @@ namespace ParamIDs
     inline constexpr const char* limiter        = "limiter";
     inline constexpr const char* slotLevelMatch = "match"; // per slot: "f1_match" ...
 
+    // Added in format 3: stereo and per-voice character
+    inline constexpr const char* spread     = "spread";      // stereo width of the voices
+    inline constexpr const char* variation  = "variation";   // fixed differences between voices
+    inline constexpr const char* startPhase = "start_phase"; // 0 Reset, 1 Random
+
     // Filter envelope
     inline constexpr const char* fenvAttack  = "fenv_attack";
     inline constexpr const char* fenvDecay   = "fenv_decay";
@@ -115,7 +120,7 @@ namespace StateIDs
     // add the conversion in setStateInformation. Saves without it are version 1.
     // See docs/ADDING-CONTROLS.md.
     inline constexpr const char* formatVersion = "formatVersion";
-    inline constexpr int currentFormatVersion = 2;
+    inline constexpr int currentFormatVersion = 3; // 3: Spread, Variation, Start Phase
 }
 
 // The processing chain after the oscillators: three filter slots, the Amp
@@ -248,7 +253,7 @@ namespace Params
                     [] (float v, int) { return String (v, v < 1.0f ? 2 : 1) + " Hz"; })));
         }
         layout.add (percent (ParamIDs::lfoCutoff, "LFO to Cutoff", 0.0f, 100.0f, 0.0f));
-        layout.add (percent (ParamIDs::drift,     "Drift",         0.0f, 100.0f, 15.0f));
+        layout.add (percent (ParamIDs::drift,     "Drift",         0.0f, 100.0f, 30.0f));
         layout.add (time    (ParamIDs::glide,     "Glide",         0.0f, 2.0f,   0.0f, 0.25f));
 
         // Filter rack (18): defaults are Slot 1 / Slot 2 / Slot 3.
@@ -301,6 +306,18 @@ namespace Params
             ParameterID { ParamIDs::oversampling, 1 }, "Filter Oversampling", StringArray { "1x", "2x", "4x" }, 1));
         layout.add (std::make_unique<AudioParameterBool> (ParameterID { ParamIDs::voiceGainComp, 1 }, "Voice Gain Compensation", true));
         layout.add (std::make_unique<AudioParameterBool> (ParameterID { ParamIDs::limiter, 1 }, "Output Limiter", true));
+
+        // Added in format 3. New patches start wide and slightly "alive";
+        // projects saved before these existed load them at 0 / Reset, so
+        // they sound exactly as they did (see setStateInformation).
+        layout.add (std::make_unique<AudioParameterFloat> (
+            ParameterID { ParamIDs::spread, 2 }, "Stereo Spread", NormalisableRange<float> (0.0f, 100.0f, 0.1f), 50.0f,
+            AudioParameterFloatAttributes().withLabel ("%").withStringFromValueFunction (percentText)));
+        layout.add (std::make_unique<AudioParameterFloat> (
+            ParameterID { ParamIDs::variation, 2 }, "Voice Variation", NormalisableRange<float> (0.0f, 100.0f, 0.1f), 25.0f,
+            AudioParameterFloatAttributes().withLabel ("%").withStringFromValueFunction (percentText)));
+        layout.add (std::make_unique<AudioParameterChoice> (
+            ParameterID { ParamIDs::startPhase, 2 }, "Start Phase", StringArray { "Reset", "Random" }, 1));
         for (int i = 0; i < ParamIDs::numSlots; ++i)
             layout.add (std::make_unique<AudioParameterBool> (
                 ParameterID { ParamIDs::slot (i, ParamIDs::slotLevelMatch), 1 },
