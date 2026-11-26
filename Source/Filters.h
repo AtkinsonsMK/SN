@@ -408,7 +408,8 @@ private:
                 const int n = (int) combBuffer.size();
                 float readPos = (float) combWrite - delay;
                 if (readPos < 0.0f) readPos += (float) n;
-                const int i0 = (int) readPos;
+                // Rounding can land readPos exactly on n (e.g. -1e-7 + n), so wrap the index too.
+                const int i0 = std::clamp ((int) readPos, 0, n - 1);
                 const float frac = readPos - (float) i0;
                 const float d = combBuffer[(size_t) i0] * (1.0f - frac) + combBuffer[(size_t) ((i0 + 1) % n)] * frac;
                 const float y = sat (x + fb * d);

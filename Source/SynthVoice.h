@@ -377,7 +377,7 @@ public:
             const float lfoOct = lfo * cur.lfoToCutoff * lfoOctavesAtFull; // older projects' "LFO to Cutoff"
 
             const float gain = ampEnv.next() * noteGain;
-            if (cur.taps[0] != nullptr) cur.taps[0][pos] += osc * gain;
+            if (cur.taps[0] != nullptr) cur.taps[0][pos] += osc;
 
             // The chain: Filters 1-3, Amp and EQ in the chosen order.
             float x = osc;
@@ -402,11 +402,20 @@ public:
                 {
                     x = eq.process (x);
                 }
-                // The displays show each stage at the level you'd hear it.
-                if (cur.taps[n + 1] != nullptr) cur.taps[n + 1][pos] += ampDone ? x : x * gain;
+                // The Numbers view shows each stage as it really is, so the
+                // Amp column is where the envelope and velocity take effect.
+                if (cur.taps[n + 1] != nullptr) cur.taps[n + 1][pos] += x;
             }
             lastFreq = (float) (freq * tune1);
 
+            if (! std::isfinite (x))
+            {
+                // Something produced a broken number: clear this voice's
+                // filters, EQ and smoothing so it recovers instead of going
+                // silent for good.
+                recoverFromBadValue();
+                x = 0.0f;
+            }
             const float sample = x;
 
             for (int ch = 0; ch < numChannels; ++ch)
@@ -424,6 +433,21 @@ public:
     }
 
 private:
+    void recoverFromBadValue()
+    {
+        osc1.reset (shared.osc[0]);
+        osc2.reset (shared.osc[1]);
+        subPhase = 0.0;
+        for (auto& f : filters)
+            f.reset();
+        eq.reset();
+        sSub = shared.subLevel;
+        sFm12 = shared.fm1to2; sFm21 = shared.fm2to1; sRing = shared.ringMod;
+        sLvl1 = shared.osc[0].level; sLvl2 = shared.osc[1].level;
+        driftValue = 0.0f;
+        snapSmoothing = true; // the next 16-sample update puts the rest back to the knob values
+    }
+
     // The newest note tells the screen what to draw.
     void publishLiveInfo()
     {

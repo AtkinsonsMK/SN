@@ -483,7 +483,13 @@ bool SNSynthEditor::handleKeyPress (const juce::KeyPress& key)
     if (mods.isCommandDown() || mods.isCtrlDown() || mods.isAltDown())
         return false;
 
-    // Space starts and stops the drum machine.
+    // Inside a DAW, Space and every key that isn't a note belong to the
+    // DAW (play/stop and its other shortcuts), so hand them back.
+    const bool inDaw = processor.wrapperType != juce::AudioProcessor::wrapperType_Standalone;
+    if (inDaw && ! isNoteKey (key))
+        return false;
+
+    // Space starts and stops the drum machine (standalone app only).
     if (key.getKeyCode() == juce::KeyPress::spaceKey)
     {
         if (! spaceHeld)
@@ -501,6 +507,33 @@ bool SNSynthEditor::handleKeyPress (const juce::KeyPress& key)
     return true;
 }
 
+bool SNSynthEditor::isNoteKey (const juce::KeyPress& key)
+{
+    const auto c = juce::CharacterFunctions::toLowerCase (key.getTextCharacter());
+    for (const auto& k : noteKeys)
+        if (c == (juce::juce_wchar) k.key)
+            return true;
+    return false;
+}
+
+// New notes start only while an SN window is the active one and nobody is
+// typing into a text box. (Keys are read directly from the keyboard, so
+// without this, typing "250" into a knob's box played three notes, and two
+// open SN windows both played.)
+bool SNSynthEditor::canStartKeyNotes() const
+{
+    if (! juce::Process::isForegroundProcess())
+        return false;
+    if (dynamic_cast<juce::TextEditor*> (juce::Component::getCurrentlyFocusedComponent()) != nullptr)
+        return false;
+    auto windowActive = [] (const juce::Component* c)
+    {
+        auto* peer = c != nullptr ? c->getPeer() : nullptr;
+        return peer != nullptr && peer->isFocused();
+    };
+    return windowActive (this) || windowActive (numbersWindow.get());
+}
+
 bool SNSynthEditor::updateHeldKeys()
 {
     if (spaceHeld && ! juce::KeyPress (juce::KeyPress::spaceKey).isCurrentlyDown())
@@ -512,7 +545,7 @@ bool SNSynthEditor::updateHeldKeys()
         const bool down = juce::KeyPress ((int) noteKeys[i].key).isCurrentlyDown();
         auto& held = heldNotes[i];
 
-        if (down && held < 0)
+        if (down && held < 0 && canStartKeyNotes())
         {
             held = 12 * (baseOctave + 1) + noteKeys[i].semitone; // octave 3: Z = C3 = MIDI 48
             if (held <= 127)

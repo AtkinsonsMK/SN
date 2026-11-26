@@ -12,8 +12,14 @@ SNSynthProcessor::SNSynthProcessor()
     {
         auto get = [&] (const char* c) { return parameters.getRawParameterValue (ParamIDs::slot (i, c)); };
         slotParams[(size_t) i] = { get (ParamIDs::slotType), get (ParamIDs::slotCutoff), get (ParamIDs::slotResonance),
-                                   get (ParamIDs::slotDrive), get (ParamIDs::slotEnv), get (ParamIDs::slotCharacter) };
+                                   get (ParamIDs::slotDrive), get (ParamIDs::slotEnv), get (ParamIDs::slotCharacter),
+                                   get (ParamIDs::slotLevelMatch) };
     }
+
+    for (auto* param : getParameters())
+        if (auto* ranged = dynamic_cast<juce::RangedAudioParameter*> (param))
+            safeParams.push_back ({ parameters.getRawParameterValue (ranged->getParameterID()),
+                                    ranged->convertFrom0to1 (ranged->getDefaultValue()) });
     setChainOrder (Chain::defaultOrder());
 
     for (int t = 0; t < Mod::numTargets; ++t)
@@ -54,6 +60,7 @@ void SNSynthProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     voiceComp.setCurrentAndTargetValue (1.0f);
     for (auto& t : tapBuffers)
         t.assign ((size_t) juce::jmax (samplesPerBlock, 512), 0.0f);
+    synthOutTap.assign ((size_t) juce::jmax (samplesPerBlock, 512), 0.0f);
     voiceSettings.live = &live;
     voiceSettings.lastNote = -1.0;
     updateVoiceSettings();
@@ -98,6 +105,7 @@ void SNSynthProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
     keyboardState.processNextMidiBuffer (midi, 0, buffer.getNumSamples(), true);
 
     const int n = buffer.getNumSamples();
+    repairBadParameterValues();
     updateVoiceSettings();
     renderLfo (n);
 
@@ -108,6 +116,8 @@ void SNSynthProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
         std::fill (tapBuffers[t].begin(), tapBuffers[t].begin() + n, 0.0f);
         voiceSettings.taps[t] = tapBuffers[t].data();
     }
+    if ((int) synthOutTap.size() < n)
+        synthOutTap.resize ((size_t) n); // only if the host exceeds its announced block size
 
     // Mod wheel (MIDI CC 1)
     for (const auto meta : midi)
@@ -148,6 +158,11 @@ void SNSynthProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
             const float og = outputGain.getNextValue();
             const float drums = drumOut[(size_t) i];
             float peak = 0.0f;
+            if (numChannels > 0)
+            {
+                const float synthOnly = buffer.getReadPointer (0)[i] * vc * og;
+                synthOutTap[(size_t) i] = std::isfinite (synthOnly) ? synthOnly : 0.0f;
+            }
             for (int ch = 0; ch < numChannels; ++ch)
             {
                 auto& x = buffer.getWritePointer (ch)[i];
@@ -169,6 +184,7 @@ void SNSynthProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
                     const float lg = limiterCeiling / limiterEnv;
                     for (int ch = 0; ch < numChannels; ++ch)
                         buffer.getWritePointer (ch)[i] *= lg;
+                    synthOutTap[(size_t) i] *= lg;
                     live.limiting.store (true);
                 }
             }
@@ -212,18 +228,29 @@ void SNSynthProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
 
     // Feed the displays.
     int w = live.writePos.load (std::memory_order_relaxed);
-    const float* out = numChannels > 0 ? buffer.getReadPointer (0) : nullptr;
+    // The Output column is the keyboard notes alone (after Voice Gain Comp,
+    // Volume and the Limiter), so it lines up with the stages before it; the
+    // drums are mixed in at the same point but not shown here.
     for (int i = 0; i < numSamples; ++i)
     {
         auto& f = live.ring[(size_t) (w & (LiveInfo::ringSize - 1))];
         for (size_t t = 0; t < tapBuffers.size(); ++t)
             f.v[t] = tapBuffers[t][(size_t) i];
-        f.v[LiveInfo::numStages - 1] = out != nullptr ? out[i] : 0.0f;
+        f.v[LiveInfo::numStages - 1] = juce::jlimit (-limiterCeiling, limiterCeiling, synthOutTap[(size_t) i]);
         ++w;
     }
     live.writePos.store (w & 0x3fffffff, std::memory_order_release);
     live.lfoPhase.store ((float) lfoPhases[0]);
     live.lfo2Phase.store ((float) lfoPhases[1]);
+}
+
+void SNSynthProcessor::repairBadParameterValues()
+{
+    // A broken number in one control would spread through the filters and
+    // silence everything until reload. Put that control back to its default.
+    for (auto& sp : safeParams)
+        if (! std::isfinite (sp.value->load (std::memory_order_relaxed)))
+            sp.value->store (sp.fallback, std::memory_order_relaxed);
 }
 
 void SNSynthProcessor::updateVoiceSettings()
@@ -266,7 +293,7 @@ void SNSynthProcessor::updateVoiceSettings()
     {
         auto& slot = v.slots[i];
         slot.type       = (int) slotParams[i].type->load();
-        slot.levelMatch = parameters.getRawParameterValue (ParamIDs::slot ((int) i, ParamIDs::slotLevelMatch))->load() > 0.5f;
+        slot.levelMatch = slotParams[i].levelMatch->load() > 0.5f; // cached: building the name here allocated memory
         slot.oversample = os;
     }
 
@@ -426,6 +453,14 @@ void SNSynthProcessor::renderDrums (int numSamples)
             }
             else if (b == Chain::eq && ! drumEq.flat)
                 x = drumEq.process (x);
+        }
+        if (! std::isfinite (x))
+        {
+            // A filter went bad: clear the drums' filters and EQ so they recover.
+            for (auto& f : drumFilters) f.reset();
+            drumEq.reset();
+            drumSmooth = {};
+            x = 0.0f;
         }
         drumOut[(size_t) i] = x + drumBus[0][(size_t) i];
     }
@@ -669,6 +704,13 @@ void SNSynthProcessor::setStateInformation (const void* data, int sizeInBytes)
     if (auto xml = getXmlFromBinary (data, sizeInBytes))
         if (xml->hasTagName (parameters.state.getType()))
         {
+            // A damaged preset can hold "nan" or "inf" for a control: load
+            // that control at its default instead.
+            for (auto* child : xml->getChildWithTagNameIterator ("PARAM"))
+                if (child->hasAttribute ("value") && ! std::isfinite (child->getDoubleAttribute ("value")))
+                    if (auto* param = dynamic_cast<juce::RangedAudioParameter*> (parameters.getParameter (child->getStringAttribute ("id"))))
+                        child->setAttribute ("value", param->convertFrom0to1 (param->getDefaultValue()));
+
             parameters.replaceState (juce::ValueTree::fromXml (*xml));
             applySlotOrderFromState();
             if (parameters.state.hasProperty (StateIDs::drumPattern))

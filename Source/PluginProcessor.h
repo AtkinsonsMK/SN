@@ -71,7 +71,7 @@ private:
     void renderDrums (int numSamples);
     void hitDrum (int d);
 
-    struct SlotParams { std::atomic<float> *type, *cutoff, *res, *drive, *env, *character; };
+    struct SlotParams { std::atomic<float> *type, *cutoff, *res, *drive, *env, *character, *levelMatch; };
     std::array<SlotParams, 3> slotParams {};
     std::array<std::atomic<int>, Chain::numBlocks> chainOrder { 0, 1, 2, 3, 4 };
 
@@ -113,6 +113,13 @@ private:
     std::unique_ptr<OutputFollower> outputFollower; // standalone app: follow the Mac's system output
 
     std::atomic<float>* volumeParam = nullptr;
+
+    // Every control's live value and its default, so a broken value ("not a
+    // number" from a damaged preset or a glitchy host) can be put back.
+    struct SafeParam { std::atomic<float>* value; float fallback; };
+    std::vector<SafeParam> safeParams; // filled once in the constructor
+    void repairBadParameterValues();
+    std::vector<float> synthOutTap;    // the keyboard notes alone at the output, for the Numbers view
     std::atomic<float>* p (const char* id) { return parameters.getRawParameterValue (id); }
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Multiplicative> outputGain;
 

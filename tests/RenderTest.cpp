@@ -9,6 +9,18 @@
 #include <cmath>
 #include <iostream>
 
+// Counts memory allocations while switched on, to prove the audio thread never allocates.
+static std::atomic<long> allocCount { 0 };
+static std::atomic<bool> countAllocs { false };
+void* operator new (std::size_t n)
+{
+    if (countAllocs.load (std::memory_order_relaxed)) allocCount.fetch_add (1, std::memory_order_relaxed);
+    if (void* ptr = std::malloc (n > 0 ? n : 1)) return ptr;
+    throw std::bad_alloc();
+}
+void operator delete (void* ptr) noexcept { std::free (ptr); }
+void operator delete (void* ptr, std::size_t) noexcept { std::free (ptr); }
+
 static int failures = 0;
 static void check (bool ok, const juce::String& what)
 {
@@ -1267,6 +1279,69 @@ int main (int argc, char** argv)
             const double ratio = atJump / juce::jmax (1.0e-9, between);
             check (ratio < 2.0, "No zipper clicks when Cutoff jumps (click / steady = " + juce::String (ratio, 2) + ")");
         }
+    }
+
+    // Robustness: no memory allocated per block, broken numbers recover,
+    // and the Numbers view's Amp column shows the Amp's effect.
+    {
+        const double sr = 48000.0;
+        auto p = makeSynth (sr);
+        setParam (*p, ParamIDs::drumPlay, 1.0f);
+        juce::AudioBuffer<float> block (2, 512);
+        auto play = [&] (int blocks, bool count)
+        {
+            float peak = 0.0f;
+            for (int b = 0; b < blocks; ++b)
+            {
+                juce::MidiBuffer midi;
+                if (b == 0) midi.addEvent (juce::MidiMessage::noteOn (1, 60, (juce::uint8) 100), 0);
+                if (b == blocks - 1) midi.addEvent (juce::MidiMessage::noteOff (1, 60), 0);
+                countAllocs = count;
+                p->processBlock (block, midi);
+                countAllocs = false;
+                if (b > blocks / 2) peak = juce::jmax (peak, block.getMagnitude (0, 0, 512));
+            }
+            return peak;
+        };
+        play (20, false); // warm up
+        allocCount = 0;
+        play (200, true);
+        check (allocCount.load() == 0, "No memory allocated while playing (" + juce::String ((int) allocCount.load()) + " in 200 blocks)");
+
+        // A damaged preset holding "nan" for Filter 1 Cutoff.
+        juce::MemoryBlock state;
+        p->getStateInformation (state);
+        auto xml = juce::AudioProcessor::getXmlFromBinary (state.getData(), (int) state.getSize());
+        for (auto* child : xml->getChildWithTagNameIterator ("PARAM"))
+            if (child->getStringAttribute ("id") == ParamIDs::slot (0, ParamIDs::slotCutoff))
+                child->setAttribute ("value", "nan");
+        juce::MemoryBlock bad;
+        juce::AudioProcessor::copyXmlToBinary (*xml, bad);
+        p->setStateInformation (bad.getData(), (int) bad.getSize());
+        const float afterPreset = play (40, false);
+        check (afterPreset > 0.01f && std::isfinite (paramValue (*p, ParamIDs::slot (0, ParamIDs::slotCutoff))),
+               "A preset with a broken number still plays (peak " + juce::String (afterPreset, 3) + ")");
+
+        // A broken number arriving while a note plays (glitchy host automation).
+        p->parameters.getRawParameterValue (ParamIDs::slot (0, ParamIDs::slotResonance))->store (std::numeric_limits<float>::quiet_NaN());
+        const float afterGlitch = play (40, false);
+        check (afterGlitch > 0.01f, "A broken value during play doesn't silence the synth (peak " + juce::String (afterGlitch, 3) + ")");
+
+        // Numbers view: with Amp Sustain at 50%, the Amp column is about half the one before it.
+        setParam (*p, ParamIDs::drumPlay, 0.0f);
+        setParam (*p, ParamIDs::aenvSustain, 50.0f);
+        for (int b = 0; b < 80; ++b)
+        {
+            juce::MidiBuffer midi;
+            if (b == 0) midi.addEvent (juce::MidiMessage::noteOn (1, 57, (juce::uint8) 127), 0);
+            p->processBlock (block, midi);
+        }
+        std::vector<LiveInfo::Frame> frames (4096);
+        p->live.copyLatest (frames.data(), 4096);
+        double before = 0.0, after = 0.0;
+        for (auto& f : frames) { before += f.v[3] * f.v[3]; after += f.v[4] * f.v[4]; }
+        const double ampDb = 10.0 * std::log10 (after / juce::jmax (1.0e-12, before));
+        check (std::abs (ampDb + 6.0) < 1.5, "Numbers view: the Amp column shows the Amp's change (" + juce::String (ampDb, 1) + " dB at 50% sustain)");
     }
 
     std::cout << (failures == 0 ? "All checks passed" : juce::String (failures) + " check(s) failed") << std::endl;

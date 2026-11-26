@@ -155,6 +155,8 @@ private:
     void layoutGroup (KnobGroup&, juce::Rectangle<int> area, int topExtra = 0);
     bool keyPressed (const juce::KeyPress&, juce::Component*) override;
     bool keyStateChanged (bool isKeyDown, juce::Component*) override;
+    static bool isNoteKey (const juce::KeyPress&);
+    bool canStartKeyNotes() const;
     bool handleKeyPress (const juce::KeyPress&);
     bool updateHeldKeys();
     void shiftOctave (int delta);
