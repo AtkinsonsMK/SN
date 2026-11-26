@@ -18,6 +18,7 @@ struct VoiceSettings
     float ringMod = 0.0f;                        // 0..1
     float fenvA = 0.001f, fenvD = 0.4f, fenvS = 0.3f, fenvR = 0.3f;
     float aenvA = 0.001f, aenvD = 0.3f, aenvS = 1.0f, aenvR = 0.2f;
+    float fenvCurve = 0.0f, aenvCurve = 0.0f; // -1..1, see Envelope::setParameters
     float lfoToCutoff = 0.0f; // 0..1
     float drift = 0.15f;      // 0..1
     float glideSeconds = 0.0f;
@@ -192,6 +193,9 @@ public:
 
         for (auto& f : filters)
             f.prepare ((float) newRate);
+        for (auto& f : fadeFilters)
+            f.prepare ((float) newRate);
+        typeFadeLen = juce::jmax (1, (int) (0.01 * newRate)); // 10 ms
 
         smoothCoef = 1.0f - std::exp (-1.0f / (0.005f * (float) newRate)); // 5 ms
         smoothCoef4x = 1.0f - std::exp (-1.0f / (0.005f * 4.0f * (float) newRate));
@@ -278,6 +282,7 @@ public:
             }
             for (auto& f : filters)
                 f.reset();
+            for (int b = 0; b < 3; ++b) { lastType[b] = -1; typeFadeLeft[b] = 0; } // a new note takes the types as they are
             eq.reset();
             sSub = shared.subLevel;
             sFm12 = shared.fm1to2; sFm21 = shared.fm2to1; sRing = shared.ringMod;
@@ -532,7 +537,33 @@ public:
                     slot.character = juce::jlimit (0.0f, 1.0f, sChar[b] + mb[4]);
                     const float cutoffOct = sOct[b] + mb[0] + fenv * (sEnvAmt[b] + mb[3]) * envOctavesAtFull + lfoOct;
                     lastCutoffHz[b] = std::exp2 (juce::jlimit (4.3f, 14.3f, cutoffOct));
-                    x = filters[b].process (x, slot, lastCutoffHz[b]);
+
+                    // Filter type changed mid-note: the old type carries on
+                    // in a spare filter and fades out over 10 ms while the new
+                    // one fades in, instead of the sound jumping (a click).
+                    if (slot.type != lastType[b])
+                    {
+                        if (lastType[b] >= 0)
+                        {
+                            fadeFilters[b] = filters[b]; // same sizes: copies, never allocates
+                            fadeType[b] = lastType[b];
+                            typeFadeLeft[b] = typeFadeLen;
+                            filters[b].reset();
+                        }
+                        lastType[b] = slot.type;
+                    }
+                    float y = filters[b].process (x, slot, lastCutoffHz[b]);
+                    if (typeFadeLeft[b] > 0)
+                    {
+                        auto old = slot;
+                        old.type = fadeType[b];
+                        const float yOld = fadeFilters[b].process (x, old, lastCutoffHz[b]);
+                        const float t = (float) typeFadeLeft[b] / (float) typeFadeLen;
+                        const float fadeIn = 0.5f - 0.5f * std::cos (juce::MathConstants<float>::pi * (1.0f - t));
+                        y = yOld + (y - yOld) * fadeIn;
+                        --typeFadeLeft[b];
+                    }
+                    x = y;
                 }
                 else if (b == Chain::amp)
                 {
@@ -626,6 +657,8 @@ private:
         subPhase = 0.0;
         for (auto& f : filters)
             f.reset();
+        for (auto& n : typeFadeLeft)
+            n = 0;
         eq.reset();
         sSub = shared.subLevel;
         sFm12 = shared.fm1to2; sFm21 = shared.fm2to1; sRing = shared.ringMod;
@@ -662,6 +695,7 @@ private:
             out.startLevel.store (e.stageStartLevel());
             out.level.store (e.level());
             out.stage.store (e.stageIndex());
+            out.curveRatio.store ((float) e.curveRatioNow());
         };
         publish (live->filterEnv, filterEnv, cur.fenvA, cur.fenvD, cur.fenvR);
         publish (live->ampEnv, ampEnv, cur.aenvA, cur.aenvD, cur.aenvR);
@@ -675,12 +709,12 @@ private:
             const float a = std::exp2 (cur.variation * tol[tolEnvA] * varEnvOct);
             const float d = std::exp2 (cur.variation * tol[tolEnvD] * varEnvOct);
             const float r = std::exp2 (cur.variation * tol[tolEnvR] * varEnvOct);
-            ampEnv.setParameters    (cur.aenvA * a, cur.aenvD * d, cur.aenvS, cur.aenvR * r);
-            filterEnv.setParameters (cur.fenvA * a, cur.fenvD * d, cur.fenvS, cur.fenvR * r);
+            ampEnv.setParameters    (cur.aenvA * a, cur.aenvD * d, cur.aenvS, cur.aenvR * r, cur.aenvCurve);
+            filterEnv.setParameters (cur.fenvA * a, cur.fenvD * d, cur.fenvS, cur.fenvR * r, cur.fenvCurve);
             return;
         }
-        ampEnv.setParameters    (cur.aenvA, cur.aenvD, cur.aenvS, cur.aenvR);
-        filterEnv.setParameters (cur.fenvA, cur.fenvD, cur.fenvS, cur.fenvR);
+        ampEnv.setParameters    (cur.aenvA, cur.aenvD, cur.aenvS, cur.aenvR, cur.aenvCurve);
+        filterEnv.setParameters (cur.fenvA, cur.fenvD, cur.fenvS, cur.fenvR, cur.fenvCurve);
     }
 
     // An oscillator's tuning in semitones: its knobs plus this voice's own small offset.
@@ -773,6 +807,8 @@ private:
 
     Envelope ampEnv, filterEnv;
     FilterSlot filters[3];
+    FilterSlot fadeFilters[3];          // the old type while a type change fades
+    int lastType[3] { -1, -1, -1 }, fadeType[3] {}, typeFadeLeft[3] {}, typeFadeLen = 480;
     VoiceEq eq;
 
     int    targetNote    = 60;

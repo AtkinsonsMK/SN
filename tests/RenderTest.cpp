@@ -494,6 +494,7 @@ namespace SoundChecks
 
 #include "Phase4Checks.inc"
 #include "StereoChecks.inc"
+#include "Batch2Checks.inc"
 
 int main (int argc, char** argv)
 {
@@ -517,6 +518,7 @@ int main (int argc, char** argv)
         SoundChecks::run (sr);
         Phase4Checks::run (sr);
         StereoChecks::run (sr);
+        Batch2Checks::run (sr);
         std::cout << (failures == 0 ? "All checks passed" : juce::String (failures) + " check(s) failed") << std::endl;
         return failures == 0 ? 0 : 1;
     }
@@ -699,7 +701,8 @@ int main (int argc, char** argv)
         setParam (*p, ParamIDs::glide, 1.0f);
         setParam (*p, ParamIDs::drift, 0);
         setParam (*p, ParamIDs::spread, 0);     // pitch is counted by zero crossings of the two
-        setParam (*p, ParamIDs::startPhase, 0); // overlapping notes: keep them centred and in step
+        setParam (*p, ParamIDs::startPhase, 0); // overlapping notes: keep them centred and in step,
+        setParam (*p, ParamIDs::aenvRelease, 0.01f); // and the first note gone quickly
         render (*p, 57, 20, false);                     // A3 held
         juce::AudioBuffer<float> block (2, 512);
         juce::MidiBuffer m; m.addEvent (juce::MidiMessage::noteOff (1, 57), 0);
@@ -782,7 +785,7 @@ int main (int argc, char** argv)
     {
         auto p = makeSynth (sr);
         const int total = (int) p->getParameters().size();
-        check (total == 98, "Synth has 98 controls (found " + juce::String (total) + ")");
+        check (total == 103, "Synth has 103 controls (found " + juce::String (total) + ")");
 
         bool ok = std::abs (paramValue (*p, sid (0, ParamIDs::slotType)) - FilterType::ota) < 0.01f
                && std::abs (paramValue (*p, sid (1, ParamIDs::slotType)) - FilterType::off) < 0.01f
@@ -854,7 +857,7 @@ int main (int argc, char** argv)
     {
         // Formant: the vowel changes the tone (I is brighter than U).
         float b[2]; int k = 0;
-        for (float vowel : { 50.0f, 90.0f })
+        for (float vowel : { 50.0f, 100.0f })
         {
             auto p = makeSynth (sr);
             setType (*p, 0, FilterType::formant);
@@ -1763,6 +1766,7 @@ int main (int argc, char** argv)
     SoundChecks::run (sr);
     Phase4Checks::run (sr);
     StereoChecks::run (sr);
+        Batch2Checks::run (sr);
 
     std::cout << (failures == 0 ? "All checks passed" : juce::String (failures) + " check(s) failed") << std::endl;
     return failures == 0 ? 0 : 1;

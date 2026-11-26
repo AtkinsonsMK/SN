@@ -43,6 +43,7 @@ struct FilterSlotSettings
     float envAmount = 0.0f;    // -1..1
     float character = 0.0f;    // 0..1, the type-specific knob
     bool  levelMatch = true;   // even out loudness between filter types
+    bool  keepBass = false;    // OTA: no bass loss as resonance rises
     int   oversample = 2;      // 1, 2 or 4 times the host rate inside the filter
 };
 
@@ -70,18 +71,30 @@ namespace FilterShape
 {
     inline float otaFeedback (float res)        { return res * 4.15f; } // 24 dB: self-oscillates from about 96%
     inline float otaDamping (float res)         { return 2.0f * (1.0f - res * 0.97f); }
-    inline float sallenKeyDamping (float res)   { return 2.0f * (1.0f - res * 1.02f); }
+    inline float sallenKeyDamping (float res)   { return 2.0f * (1.0f - res * 1.05f); }
     inline float gateDamping (float res)        { return 2.0f * (1.0f - res * 0.8f); }
     inline float sallenKeyHpHz (float ch)       { return 20.0f * std::pow (100.0f, ch); }  // 20 Hz to 2 kHz
     inline float gateDecaySeconds (float ch)    { return 0.12f * std::pow (25.0f, ch); }   // 0.12 s to 3 s
     inline bool  otaIs24dB (float ch)           { return ch < 0.5f; }
 
-    inline float steinerDamping (float res)     { return 2.0f * (1.0f - res * 1.0f); }
+    inline float steinerDamping (float res)     { return 2.0f * (1.0f - res * 1.05f); }
     inline int   steinerMode (float ch)         { return ch < 1.0f / 3.0f ? 0 : (ch < 2.0f / 3.0f ? 1 : 2); } // LP, BP, HP
     inline float polivoksDamping (float res)    { return 2.0f * (1.0f - res * 1.05f); }
     inline int   polivoksMode (float ch)        { return ch < 0.5f ? 0 : 1; }                                 // LP, BP
     inline float combFeedback (float res, float ch) { return res * 0.97f * (ch < 0.5f ? 1.0f : -1.0f); }
-    inline int   formantVowel (float ch)        { return std::min (4, (int) (ch * 5.0f)); }                   // A E I O U
+    inline int   formantVowel (float ch)        { return std::min (4, (int) (ch * 5.0f)); }                   // A E I O U (nearest, for the label)
+    // Self-oscillation level control (2-pole types): near full resonance the
+    // filter damps itself more the louder it rings, so it settles to one
+    // steady level at every cutoff and oversampling setting, in tune.
+    // strength: makes the ring settle at about 0.25 (-12 dBFS).
+    inline float selfOscControl (float res, float strength)
+    {
+        const float t = std::clamp ((res - 0.85f) / 0.15f, 0.0f, 1.0f);
+        return strength * t * t;
+    }
+    // Formant: the Vowel knob glides continuously A > E > I > O > U.
+    // Returns band b's frequency (Hz, at Cutoff 1 kHz) and level.
+    inline void formantBand (float ch, int b, float& hz, float& level);
     inline float formantQ (float res)           { return 4.0f + res * 16.0f; }
 
     // Formant frequencies (Hz) and levels for A, E, I, O, U, at Cutoff 1 kHz.
@@ -98,6 +111,16 @@ namespace FilterShape
         return table;
     }
     inline constexpr float formantReferenceHz = 1000.0f;
+
+    inline void formantBand (float ch, int b, float& hz, float& level)
+    {
+        const float pos = std::clamp (ch, 0.0f, 1.0f) * 4.0f;
+        const int i = std::min (3, (int) pos);
+        const float t = pos - (float) i;
+        const auto& tb = formantTable();
+        hz = tb[i][b][0] * std::pow (tb[i + 1][b][0] / tb[i][b][0], t); // glide in pitch, not in Hz
+        level = tb[i][b][1] + (tb[i + 1][b][1] - tb[i][b][1]) * t;
+    }
 }
 
 // One-pole low-pass / high-pass building block.
@@ -190,34 +213,49 @@ struct SvfOut { float lp, bp, hp; };
 // state, which is what makes analogue 2-pole filters "scream" at high resonance.
 struct SVF
 {
-    float s1 = 0.0f, s2 = 0.0f;
-    void reset() { s1 = s2 = 0.0f; }
+    float s1 = 0.0f, s2 = 0.0f, ringPow = 0.0f;
+    float ringCoef = 0.002f; // follows how loud it rings, over about 20 ms (set by the slot for its rate)
+    static constexpr float stateSqueezePerG = 4.0f;
+    void reset() { s1 = s2 = ringPow = 0.0f; }
 
-    // damping: 2 = no resonance, near 0 = self-oscillation.
-    float lowpass (float x, float g, float damping, float stateLimit)
+    // damping: 2 = no resonance, near 0 = self-oscillation (below 0 it grows,
+    // held by selfOsc). selfOsc: extra damping in proportion to how loud the
+    // filter rings (see FilterShape::selfOscControl).
+    float lowpass (float x, float g, float damping, float stateLimit, float selfOsc = 0.0f)
     {
+        damping += selfOsc * 2.0f * ringPow;
         const float hp = (x - (damping + g) * s1 - s2) / (1.0f + damping * g + g * g);
         const float bp = g * hp + s1;
+        ringPow += (bp * bp - ringPow) * ringCoef;
         s1 = g * hp + bp;
         const float lp = g * bp + s2;
         s2 = g * bp + lp;
 
         if (stateLimit > 0.0f)
-            s1 = stateLimit * FilterMath::sat (s1 / stateLimit);
+        {
+            // The squeeze is scaled by g (how far the filter turns per sample),
+            // so it acts the same at every cutoff and oversampling rate.
+            const float squeezed = stateLimit * FilterMath::sat (s1 / stateLimit);
+            s1 += (squeezed - s1) * std::min (1.0f, g * stateSqueezePerG);
+        }
 
         return lp;
     }
 
     // All three outputs, with a custom shaper applied to the internal states.
     template <typename Shaper>
-    SvfOut run (float x, float g, float damping, Shaper&& shape)
+    SvfOut run (float x, float g, float damping, Shaper&& shape, float selfOsc = 0.0f)
     {
-        damping = std::max (damping, 0.005f);
+        damping = selfOsc > 0.0f ? damping + selfOsc * 2.0f * ringPow : std::max (damping, 0.005f);
         const float hp = (x - (damping + g) * s1 - s2) / (1.0f + damping * g + g * g);
         const float bp = g * hp + s1;
-        s1 = shape (g * hp + bp);
+        ringPow += (bp * bp - ringPow) * ringCoef;
+        const float blend = std::min (1.0f, g * stateSqueezePerG); // as in lowpass()
+        const float n1 = g * hp + bp;
+        s1 = n1 + (shape (n1) - n1) * blend;
         const float lp = g * bp + s2;
-        s2 = shape (g * bp + lp);
+        const float n2 = g * bp + lp;
+        s2 = n2 + (shape (n2) - n2) * blend;
         return { lp, bp, hp };
     }
 };
@@ -230,6 +268,7 @@ public:
     {
         hostRate = sampleRate;
         osRate = sampleRate * (float) factor;
+        svf.ringCoef = 1.0f - std::exp (-1.0f / (0.02f * osRate));
         // Keep everything up to 20 kHz (or just under the host's top, at low rates).
         const double keep = std::min (20000.0, sampleRate * 0.4535);
         stage1.design (keep / (2.0 * sampleRate));
@@ -302,7 +341,7 @@ public:
             const float u = 1.0f - s.drive;
             float trimDb = 0.0f;
             if (s.type == FilterType::ota)                trimDb = -3.5f * (1.0f - u * u);
-            else if (s.type == FilterType::steinerParker) trimDb =  4.0f * (1.0f - u * u * u * u);
+            else if (s.type == FilterType::steinerParker) trimDb =  4.0f * (1.0f - u * u * u * u) - 1.85f * (1.0f - u * u * u);
             else if (s.type == FilterType::polivoks)      trimDb =  2.5f * (1.0f - u * u);
             makeup *= std::exp2 (trimDb * 0.16609640f); // dB to gain
         }
@@ -370,7 +409,9 @@ private:
                     float u = sat ((x - k * S) / (1.0f + k * G4));
                     for (auto& p : poles)
                         u = p.lowpass (u, g);
-                    return u * (1.0f + k * 0.45f); // keep the bass as resonance rises
+                    // Resonance thins the bass (the feedback cancels low notes), as
+                    // on the hardware; partly made up here. Keep Bass makes it up fully.
+                    return u * (s.keepBass ? 1.0f + k : 1.0f + k * 0.45f);
                 }
 
                 // 12 dB: smooth 2-pole.
@@ -388,7 +429,7 @@ private:
                 float v = hpPoles[0].highpass (x, hg);
                 v = hpPoles[1].highpass (v, hg);
                 const float damping = FilterShape::sallenKeyDamping (s.resonance);
-                return svf.lowpass (sat (v * 1.2f), g, damping, 1.2f);
+                return svf.lowpass (sat (v * 1.2f), g, damping, 1.2f, FilterShape::selfOscControl (s.resonance, 3.2f));
             }
 
             case FilterType::lowpassGate:
@@ -403,7 +444,8 @@ private:
                 // Diode feedback: asymmetric clipping inside the loop gives
                 // the raw, slightly unruly Steiner-Parker character.
                 auto diode = [] (float v) { return v > 0.0f ? 1.4f * sat (v / 1.4f) : 0.9f * sat (v / 0.9f); };
-                const auto o = svf.run (sat (x), g, FilterShape::steinerDamping (s.resonance), diode);
+                const auto o = svf.run (sat (x), g, FilterShape::steinerDamping (s.resonance), diode,
+                                        FilterShape::selfOscControl (s.resonance, 3.2f));
                 switch (FilterShape::steinerMode (s.character))
                 {
                     case 0:  return o.lp;
@@ -417,7 +459,8 @@ private:
                 // Integrators that run out of headroom and clip hard:
                 // harsh and buzzy, and it breaks up at high resonance.
                 auto opAmp = [] (float v) { return std::clamp (v, -0.9f, 0.9f); };
-                const auto o = svf.run (sat (x * 1.3f), g, FilterShape::polivoksDamping (s.resonance), opAmp);
+                const auto o = svf.run (sat (x * 1.3f), g, FilterShape::polivoksDamping (s.resonance), opAmp,
+                                        FilterShape::selfOscControl (s.resonance, 3.2f));
                 return FilterShape::polivoksMode (s.character) == 0 ? o.lp : o.bp * 1.5f;
             }
 
@@ -425,7 +468,7 @@ private:
             {
                 // A short delay fed back on itself; its length is one cycle of
                 // the cutoff frequency, so it rings at that pitch.
-                const float delay = std::clamp (osRate / std::max (currentCutoffHz, 17.0f), 1.0f, (float) combBuffer.size() - 3.0f);
+                const float delay = std::clamp (osRate / std::max (currentCutoffHz, 17.0f), 2.01f, (float) combBuffer.size() - 4.0f);
                 const float fb = FilterShape::combFeedback (s.resonance, s.character);
                 const int n = (int) combBuffer.size();
                 float readPos = (float) combWrite - delay;
@@ -433,7 +476,14 @@ private:
                 // Rounding can land readPos exactly on n (e.g. -1e-7 + n), so wrap the index too.
                 const int i0 = std::clamp ((int) readPos, 0, n - 1);
                 const float frac = readPos - (float) i0;
-                const float d = combBuffer[(size_t) i0] * (1.0f - frac) + combBuffer[(size_t) ((i0 + 1) % n)] * frac;
+                // 4-point (cubic Lagrange) read between samples: a straight-line
+                // read dulls the treble by an amount that changes from note
+                // to note, so some notes rang shorter than others.
+                const float xm1 = combBuffer[(size_t) ((i0 + n - 1) % n)], x0 = combBuffer[(size_t) i0];
+                const float x1 = combBuffer[(size_t) ((i0 + 1) % n)], x2 = combBuffer[(size_t) ((i0 + 2) % n)];
+                const float f = frac, fp1 = f + 1.0f, fm1 = f - 1.0f, fm2 = f - 2.0f;
+                const float d = -f * fm1 * fm2 * (1.0f / 6.0f) * xm1 + fp1 * fm1 * fm2 * 0.5f * x0
+                                - fp1 * f * fm2 * 0.5f * x1 + fp1 * f * fm1 * (1.0f / 6.0f) * x2;
                 const float y = sat (x + fb * d);
                 combBuffer[(size_t) combWrite] = y;
                 combWrite = (combWrite + 1) % n;
@@ -443,15 +493,16 @@ private:
             case FilterType::formant:
             {
                 // Three resonant band-pass filters at the vowel's formants.
-                const auto& vowel = FilterShape::formantTable()[FilterShape::formantVowel (s.character)];
                 const float scale = currentCutoffHz / FilterShape::formantReferenceHz;
                 const float damping = 1.0f / FilterShape::formantQ (s.resonance);
                 auto none = [] (float v) { return v; };
                 float y = 0.0f;
                 for (int b = 0; b < 3; ++b)
                 {
-                    const float gb = tptGain (vowel[b][0] * scale, osRate);
-                    y += formantBands[b].run (x, gb, damping, none).bp * damping * 2.0f * vowel[b][1];
+                    float hz, level;
+                    FilterShape::formantBand (s.character, b, hz, level);
+                    const float gb = tptGain (hz * scale, osRate);
+                    y += formantBands[b].run (x, gb, damping, none).bp * damping * 2.0f * level;
                 }
                 return sat (y * 2.5f);
             }
@@ -499,6 +550,7 @@ private:
     {
         factor = newFactor >= 4 ? 4 : (newFactor <= 1 ? 1 : 2);
         osRate = hostRate * (float) factor;
+        svf.ringCoef = 1.0f - std::exp (-1.0f / (0.02f * osRate));
         stage1.reset();
         stage2.reset();
     }

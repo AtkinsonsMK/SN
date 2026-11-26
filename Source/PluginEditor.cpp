@@ -47,14 +47,16 @@ SNSynthEditor::SNSynthEditor (SNSynthProcessor& p)
 
     filterEnvGroup.title = "Filter Envelope";
     filterEnvGroup.knobs = { &makeKnob (fenvAttack, "Attack"), &makeKnob (fenvDecay, "Decay"),
-                             &makeKnob (fenvSustain, "Sustain"), &makeKnob (fenvRelease, "Release") };
+                             &makeKnob (fenvSustain, "Sustain"), &makeKnob (fenvRelease, "Release"),
+                             &makeKnob (fenvCurve, "Curve") };
 
     outputGroup.title = "Output";
     outputGroup.knobs = { &makeKnob (volume, "Volume") };
 
     ampEnvGroup.title = "Amp Envelope";
     ampEnvGroup.knobs = { &makeKnob (aenvAttack, "Attack"), &makeKnob (aenvDecay, "Decay"),
-                          &makeKnob (aenvSustain, "Sustain"), &makeKnob (aenvRelease, "Release") };
+                          &makeKnob (aenvSustain, "Sustain"), &makeKnob (aenvRelease, "Release"),
+                          &makeKnob (aenvCurve, "Curve") };
 
     lfo1Group.title = "LFO 1";
     lfo1Group.knobs = { &makeKnob (lfoRate, "Rate"), &makeKnob (ParamIDs::lfo1Shape, "Shape"), &makeKnob (lfo1Smooth, "Smooth") };
@@ -261,6 +263,15 @@ void SNSynthEditor::setupSlot (SlotPanel& sp, int slotIndex)
     sp.levelMatchAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (
         processor.parameters, slot (slotIndex, slotLevelMatch), sp.levelMatch);
 
+    sp.keepBass.setWantsKeyboardFocus (false);
+    sp.keepBass.setColour (juce::ToggleButton::textColourId, dimText);
+    sp.keepBass.setColour (juce::ToggleButton::tickColourId, accent);
+    sp.keepBass.setTooltip ("Keep Bass (OTA only): turning up Resonance normally thins out the low end, as on the hardware. "
+                            "Turn on to keep the bass full at any Resonance.");
+    content.addChildComponent (sp.keepBass);
+    sp.keepBassAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (
+        processor.parameters, slot (slotIndex, keepBass), sp.keepBass);
+
     updateSlotTypeDisplay (sp);
 }
 
@@ -271,6 +282,7 @@ void SNSynthEditor::updateSlotTypeDisplay (SlotPanel& sp)
     if (t == sp.shownType)
         return;
     sp.shownType = t;
+    sp.keepBass.setVisible (t == FilterType::ota);
 
     auto& k = *sp.characterKnob;
     juce::String label = "Type Knob";
@@ -312,7 +324,16 @@ void SNSynthEditor::updateSlotTypeDisplay (SlotPanel& sp)
             break;
         case FilterType::formant:
             label = "Vowel";
-            text = [] (double v) { const char* m[] = { "A", "E", "I", "O", "U" }; return juce::String (m[FilterShape::formantVowel ((float) v / 100.0f)]); };
+            // The vowel glides: A at 0%, E 25%, I 50%, O 75%, U 100%, blends between.
+            text = [] (double v)
+            {
+                const char* m[] = { "A", "E", "I", "O", "U" };
+                const double pos = juce::jlimit (0.0, 4.0, v / 25.0);
+                const int near = juce::roundToInt (pos);
+                if (std::abs (pos - near) < 0.12) return juce::String (m[near]);
+                const int lo = (int) pos;
+                return juce::String (m[lo]) + ">" + m[juce::jmin (4, lo + 1)];
+            };
             break;
         default:
             text = [] (double v) { return juce::String (juce::roundToInt (v)) + "%"; };
@@ -852,9 +873,9 @@ void SNSynthEditor::layoutContent()
         colA.removeFromTop (gap);
         auto row2 = colA.removeFromTop (rowH);
         hRule (row2);
-        const int unit = (row2.getWidth() - 2 * gap) / 14;
+        const int unit = (row2.getWidth() - 2 * gap) / 15;
         layoutGroup (mixGroup,    row2.removeFromLeft (unit * 7)); vRule (row2);
-        layoutGroup (ampEnvGroup, row2.removeFromLeft (unit * 4)); vRule (row2);
+        layoutGroup (ampEnvGroup, row2.removeFromLeft (unit * 5)); vRule (row2);
         layoutGroup (eqGroup,     row2);
 
         colA.removeFromTop (gap);
@@ -874,6 +895,7 @@ void SNSynthEditor::layoutContent()
             layoutGroup (sp.group, b, 26);
             auto header = b.reduced (8, 6).removeFromTop (20);
             sp.levelMatch.setBounds (header.removeFromRight (70));
+            sp.keepBass.setBounds (header.removeFromRight (100));
             sp.type.setBounds (header.withY (header.getY() + 22).withHeight (22).withX (b.getX() + 8).withWidth (b.getWidth() - 16));
         }
 

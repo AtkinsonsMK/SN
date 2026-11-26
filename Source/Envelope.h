@@ -15,17 +15,41 @@ public:
         sustainGlide = 1.0 - std::exp (-1.0 / (0.005 * sr)); // 5 ms
     }
 
-    void setParameters (float attackSec, float decaySec, float sustainLevel, float releaseSec)
+    // curve: -1..1. 0 is the classic analogue shape; towards -1 decay and
+    // release become straighter lines, towards +1 they drop away faster at
+    // first with a longer soft tail. Decay and Release times are when the
+    // level has fallen 99% of the way (-40 dB), whatever the curve.
+    void setParameters (float attackSec, float decaySec, float sustainLevel, float releaseSec, float curve = 0.0f)
     {
         sustain = sustainLevel;
         coefficients (attackSec,  attackRatio, attackCoef,  attackBase);
         attackBase = (1.0 + attackRatio) * (1.0 - attackCoef);
 
-        coefficients (decaySec,   decayRatio,  decayCoef,   decayBase);
-        decayBase = (sustain - decayRatio) * (1.0 - decayCoef);
+        if (std::abs (curve - lastCurve) > 1.0e-6f)
+        {
+            lastCurve = curve;
+            ratio = curveRatio (curve);
+            ratioStretch = stretch (ratio);
+        }
+        coefficients (decaySec * (float) ratioStretch, ratio, decayCoef, decayBase);
+        decayBase = (sustain - ratio) * (1.0 - decayCoef);
 
-        coefficients (releaseSec, decayRatio,  releaseCoef, releaseBase);
-        releaseBase = -decayRatio * (1.0 - releaseCoef);
+        coefficients (releaseSec * (float) ratioStretch, ratio, releaseCoef, releaseBase);
+        releaseBase = -ratio * (1.0 - releaseCoef);
+    }
+
+    // How far past the target the decay and release curves aim: small =
+    // strongly curved, large = nearly straight.
+    static double curveRatio (float curve)
+    {
+        curve = std::min (1.0f, std::max (-1.0f, curve));
+        return curve >= 0.0f ? std::pow (10.0, -4.0 - 2.0 * curve) : std::pow (10.0, -4.0 - 5.0 * curve);
+    }
+
+    // Full fall time / time to fall 99% of the way, for a curve ratio.
+    static double stretch (double r)
+    {
+        return std::log (r / (1.0 + r)) / std::log ((0.01 + r) / (1.0 + r));
     }
 
     // Retriggering starts from the current level (no click), as analogue envelopes do.
@@ -48,7 +72,7 @@ public:
     // through it you are (0..1): attack rises from its start level to 1,
     // decay falls from 1 to the sustain level, release falls from its start
     // level to 0. Stage numbers as stageIndex().
-    static float curveLevel (int stageNum, float fraction, float startLevel, float sustainLvl)
+    static float curveLevel (int stageNum, float fraction, float startLevel, float sustainLvl, double decayRatio = classicRatio)
     {
         const double f = std::min (1.0, std::max (0.0, (double) fraction));
         switch (stageNum)
@@ -65,7 +89,7 @@ public:
     }
 
     // The reverse: how far through the stage a given level is (0..1).
-    static float curveFraction (int stageNum, float levelNow, float startLevel, float sustainLvl)
+    static float curveFraction (int stageNum, float levelNow, float startLevel, float sustainLvl, double decayRatio = classicRatio)
     {
         auto frac = [] (double d0, double dNow, double dEnd)
         {
@@ -84,8 +108,9 @@ public:
     // How long a stage really lasts, given its knob time: attack from a
     // non-zero level, decay to a high sustain, or release from a low level
     // all finish sooner than the knob time.
-    static float stageSeconds (int stageNum, float knobSeconds, float startLevel, float sustainLvl)
+    static float stageSeconds (int stageNum, float knobSeconds, float startLevel, float sustainLvl, double decayRatio = classicRatio)
     {
+        const float st = (float) stretch (decayRatio);
         auto share = [] (double d0, double dEnd, double dFull)
         {
             return d0 <= dEnd ? 0.0 : std::log (d0 / dEnd) / std::log (dFull / dEnd);
@@ -93,8 +118,8 @@ public:
         switch (stageNum)
         {
             case 1:  return knobSeconds * (float) share (1.0 + attackRatio - startLevel, attackRatio, 1.0 + attackRatio);
-            case 2:  return knobSeconds * (float) share (1.0 - sustainLvl + decayRatio, decayRatio, 1.0 + decayRatio);
-            case 4:  return knobSeconds * (float) share (std::max (0.0, (double) startLevel) + decayRatio, decayRatio, 1.0 + decayRatio);
+            case 2:  return knobSeconds * st * (float) share (1.0 - sustainLvl + decayRatio, decayRatio, 1.0 + decayRatio);
+            case 4:  return knobSeconds * st * (float) share (std::max (0.0, (double) startLevel) + decayRatio, decayRatio, 1.0 + decayRatio);
             default: return 0.0f;
         }
     }
@@ -111,7 +136,10 @@ public:
 
             case Stage::decay:
                 value = decayBase + value * decayCoef;
-                if (value <= sustain) { value = sustain; setStage (Stage::sustain); }
+                // Reaching Sustain (or Sustain moved up past the level while
+                // decaying): the sustain stage glides the last bit, so the
+                // level never jumps.
+                if (value <= sustain) setStage (Stage::sustain);
                 break;
 
             case Stage::sustain:
@@ -135,15 +163,21 @@ private:
 
     void setStage (Stage s) { stage = s; samplesInStage = 0; startValue = value; }
 
-    void coefficients (float seconds, double ratio, double& coef, double& base) const
+    void coefficients (float seconds, double target, double& coef, double& base) const
     {
         const double samples = std::max (1.0, (double) seconds * sampleRate);
-        coef = std::exp (-std::log ((1.0 + ratio) / ratio) / samples);
+        coef = std::exp (-std::log ((1.0 + target) / target) / samples);
         base = 0.0;
     }
 
+public:
+    double curveRatioNow() const { return ratio; }
+    static constexpr double classicRatio = 0.0001; // the shape before the Curve control (Curve 0)
+
+private:
     static constexpr double attackRatio = 0.3;
-    static constexpr double decayRatio  = 0.0001;
+    double ratio = classicRatio, ratioStretch = stretch (classicRatio);
+    float lastCurve = 0.0f;
 
     double sampleRate = 44100.0;
     double sustainGlide = 0.005;

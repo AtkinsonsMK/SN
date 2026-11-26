@@ -17,7 +17,7 @@ SNSynthProcessor::SNSynthProcessor()
         auto get = [&] (const char* c) { return parameters.getRawParameterValue (ParamIDs::slot (i, c)); };
         slotParams[(size_t) i] = { get (ParamIDs::slotType), get (ParamIDs::slotCutoff), get (ParamIDs::slotResonance),
                                    get (ParamIDs::slotDrive), get (ParamIDs::slotEnv), get (ParamIDs::slotCharacter),
-                                   get (ParamIDs::slotLevelMatch) };
+                                   get (ParamIDs::slotLevelMatch), get (ParamIDs::keepBass) };
     }
 
     for (auto* param : getParameters())
@@ -327,6 +327,8 @@ void SNSynthProcessor::updateVoiceSettings()
     v.spread         = juce::jlimit (0.0f, 1.0f, p (ParamIDs::spread)->load() * 0.01f);
     v.variation      = juce::jlimit (0.0f, 1.0f, p (ParamIDs::variation)->load() * 0.01f);
     v.randomPhase    = p (ParamIDs::startPhase)->load() > 0.5f;
+    v.fenvCurve      = juce::jlimit (-1.0f, 1.0f, p (ParamIDs::fenvCurve)->load() * 0.01f);
+    v.aenvCurve      = juce::jlimit (-1.0f, 1.0f, p (ParamIDs::aenvCurve)->load() * 0.01f);
     const int os     = 1 << juce::jlimit (0, 2, (int) p (ParamIDs::oversampling)->load());
 
     for (size_t i = 0; i < 3; ++i)
@@ -334,6 +336,7 @@ void SNSynthProcessor::updateVoiceSettings()
         auto& slot = v.slots[i];
         slot.type       = (int) slotParams[i].type->load();
         slot.levelMatch = slotParams[i].levelMatch->load() > 0.5f; // cached: building the name here allocated memory
+        slot.keepBass   = slotParams[i].keepBass->load() > 0.5f;
         slot.oversample = os;
     }
 
@@ -870,6 +873,27 @@ void SNSynthProcessor::setStateInformation (const void* data, int sizeInBytes)
                 for (auto* id : { ParamIDs::spread, ParamIDs::variation, ParamIDs::startPhase })
                     if (auto* prm = parameters.getParameter (id))
                         prm->setValueNotifyingHost (0.0f);
+
+            // Before format 4, Decay and Release were the time to fall all the
+            // way (-80 dB); now they are the time to fall 99% (-40 dB), as on
+            // hardware. Shorten the saved times so old projects sound the same.
+            // Before format 4 the Formant's Vowel knob had five steps (A 0-20%,
+            // E 20-40% ...); now it glides, with A at 0%, E 25% ... U 100%.
+            if (loadedFormatVersion < 4)
+                for (int sl = 0; sl < ParamIDs::numSlots; ++sl)
+                    if ((int) slotParams[(size_t) sl].type->load() == FilterType::formant)
+                        if (auto* prm = dynamic_cast<juce::RangedAudioParameter*> (parameters.getParameter (ParamIDs::slot (sl, ParamIDs::slotCharacter))))
+                        {
+                            const int vowel = FilterShape::formantVowel (prm->convertFrom0to1 (prm->getValue()) * 0.01f);
+                            prm->setValueNotifyingHost (prm->convertTo0to1 (25.0f * (float) vowel));
+                        }
+            if (loadedFormatVersion < 4)
+                for (auto* id : { ParamIDs::fenvDecay, ParamIDs::fenvRelease, ParamIDs::aenvDecay, ParamIDs::aenvRelease })
+                    if (auto* prm = dynamic_cast<juce::RangedAudioParameter*> (parameters.getParameter (id)))
+                    {
+                        const float old = prm->convertFrom0to1 (prm->getValue());
+                        prm->setValueNotifyingHost (prm->convertTo0to1 (old / (float) Envelope::stretch (Envelope::classicRatio)));
+                    }
 
             // Projects from before modulation had one "LFO to Cutoff" knob for
             // all filters. Turn it into LFO 1 routings on each filter's Cutoff

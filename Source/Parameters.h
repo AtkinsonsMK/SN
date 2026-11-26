@@ -54,6 +54,9 @@ namespace ParamIDs
     inline constexpr const char* spread     = "spread";      // stereo width of the voices
     inline constexpr const char* variation  = "variation";   // fixed differences between voices
     inline constexpr const char* startPhase = "start_phase"; // 0 Reset, 1 Random
+    inline constexpr const char* fenvCurve  = "fenv_curve";  // added in format 4
+    inline constexpr const char* aenvCurve  = "aenv_curve";
+    inline constexpr const char* keepBass   = "keepbass";    // per slot: "f1_keepbass" ... (format 4)
 
     // Filter envelope
     inline constexpr const char* fenvAttack  = "fenv_attack";
@@ -120,7 +123,7 @@ namespace StateIDs
     // add the conversion in setStateInformation. Saves without it are version 1.
     // See docs/ADDING-CONTROLS.md.
     inline constexpr const char* formatVersion = "formatVersion";
-    inline constexpr int currentFormatVersion = 3; // 3: Spread, Variation, Start Phase
+    inline constexpr int currentFormatVersion = 4; // 3: Spread, Variation, Start Phase. 4: envelope times = -40 dB point, Curve, Keep Bass
 }
 
 // The processing chain after the oscillators: three filter slots, the Amp
@@ -318,6 +321,16 @@ namespace Params
             AudioParameterFloatAttributes().withLabel ("%").withStringFromValueFunction (percentText)));
         layout.add (std::make_unique<AudioParameterChoice> (
             ParameterID { ParamIDs::startPhase, 2 }, "Start Phase", StringArray { "Reset", "Random" }, 1));
+
+        // Added in format 4: envelope Curve (0 = the classic shape) and the
+        // OTA's Keep Bass switch (off = the classic thinning with resonance).
+        for (auto [id, name] : { std::pair { ParamIDs::fenvCurve, "Filter Env Curve" }, std::pair { ParamIDs::aenvCurve, "Amp Env Curve" } })
+            layout.add (std::make_unique<AudioParameterFloat> (
+                ParameterID { id, 2 }, name, NormalisableRange<float> (-100.0f, 100.0f, 0.1f), 0.0f,
+                AudioParameterFloatAttributes().withLabel ("%").withStringFromValueFunction (percentText)));
+        for (int i = 0; i < ParamIDs::numSlots; ++i)
+            layout.add (std::make_unique<AudioParameterBool> (
+                ParameterID { ParamIDs::slot (i, ParamIDs::keepBass), 2 }, "Filter " + String (i + 1) + " Keep Bass", false));
         for (int i = 0; i < ParamIDs::numSlots; ++i)
             layout.add (std::make_unique<AudioParameterBool> (
                 ParameterID { ParamIDs::slot (i, ParamIDs::slotLevelMatch), 1 },

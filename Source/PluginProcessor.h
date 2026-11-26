@@ -77,7 +77,7 @@ private:
     void renderDrums (int numSamples);
     void hitDrum (int d);
 
-    struct SlotParams { std::atomic<float> *type, *cutoff, *res, *drive, *env, *character, *levelMatch; };
+    struct SlotParams { std::atomic<float> *type, *cutoff, *res, *drive, *env, *character, *levelMatch, *keepBass; };
     std::array<SlotParams, 3> slotParams {};
     // The whole chain order packed into one value (3 bits per position), so
     // the sound can never read it half-changed while the screen rearranges it.
