@@ -175,6 +175,12 @@ public:
             f.prepare ((float) newRate);
 
         smoothCoef = 1.0f - std::exp (-1.0f / (0.005f * (float) newRate)); // 5 ms
+        smoothCoef4x = 1.0f - std::exp (-1.0f / (0.005f * 4.0f * (float) newRate));
+        fmLpCoef = 1.0f - std::exp (-2.0f * juce::MathConstants<float>::pi * 16000.0f / (4.0f * (float) newRate));
+        // FM / ring mod oversampling: keep up to 20 kHz (or just under the top at low rates).
+        const double keep = std::min (20000.0, newRate * 0.4535);
+        oscDown1.design (keep / (2.0 * newRate));
+        oscDown2.design (keep / (4.0 * newRate));
         blockSmoothCoef = 1.0f - std::exp (-(float) modInterval / (0.005f * (float) newRate));
         driftCoef  = 1.0f - std::exp (-1.0f / (0.4f  * (float) newRate));  // 0.4 s
         driftValue = (float) (random.nextFloat() * 2.0 - 1.0);
@@ -211,6 +217,12 @@ public:
 
         if (! ampEnv.isActive())
         {
+            noteGainS = noteGain; // a fresh note starts at its own level
+            oscOversample = false;
+            oscDown1.reset(); oscDown2.reset();
+            fmLp12[0] = fmLp12[1] = fmLp21[0] = fmLp21[1] = 0.0f;
+            bendS = bendSemitones;
+            dcX1 = dcY1 = 0.0f;
             osc1.reset (shared.osc[0]);
             osc2.reset (shared.osc[1]);
             subPhase = 0.0;
@@ -227,6 +239,7 @@ public:
             f.trigger ((float) sr);
 
         refreshSettings (0);
+        needsRefresh = true; // again at the note's exact sample, when it starts rendering
         ampEnv.noteOn();
         filterEnv.noteOn();
     }
@@ -279,7 +292,9 @@ public:
 
         const double sr = getSampleRate();
         const int numChannels = output.getNumChannels();
-        float baseOct[3] { sOct[0], sOct[1], sOct[2] };
+        const float gainGlideCoef = 1.0f - (float) std::exp (-1.0 / (0.002 * sr));
+        const double bendGlideCoef = 1.0 - std::exp (-1.0 / (0.003 * sr));
+        const float dcCoef = (float) std::exp (-2.0 * juce::MathConstants<double>::pi * 5.0 / sr);
 
         for (int i = 0; i < numSamples; ++i)
         {
@@ -287,17 +302,34 @@ public:
 
             // Every 16 samples: take this voice's copy of the knobs and apply
             // its modulation (LFOs, envelopes, velocity, mod wheel, key).
-            if (i % modInterval == 0)
+            if (needsRefresh || (shared.mod != nullptr ? shared.mod->onGrid (pos) : (pos % modInterval == 0)))
             {
+                needsRefresh = false;
                 refreshSettings (pos);
                 const float keyTrackOct = cur.keyTracking * (float) (currentNote - 60.0) / 12.0f; // follows Glide
+                // The knobs (and DAW automation) are smoothed; the modulation
+                // is added afterwards, gliding in a straight line to each new
+                // 16-sample value, so fast LFOs and envelopes keep their full
+                // depth and snap.
                 for (int s = 0; s < 3; ++s)
-                    baseOct[s] = std::log2 (cur.slots[s].cutoffHz) + keyTrackOct;
+                {
+                    const auto& k = knobSlots[s];
+                    const auto& c = cur.slots[s];
+                    baseOct[s] = std::log2 (k.cutoffHz) + keyTrackOct;
+                    const float target[numSlotMods] { std::log2 (c.cutoffHz) - std::log2 (k.cutoffHz), c.resonance - k.resonance,
+                                                      c.drive - k.drive, c.envAmount - k.envAmount, c.character - k.character };
+                    for (int j = 0; j < numSlotMods; ++j)
+                    {
+                        if (snapSmoothing) modNow[s][j] = target[j];
+                        modStep[s][j] = (target[j] - modNow[s][j]) / (float) modInterval;
+                    }
+                }
+                modStepsLeft = modInterval;
                 if (snapSmoothing)
                 {
                     for (int s = 0; s < 3; ++s)
                     {
-                        const auto& slot = cur.slots[s];
+                        const auto& slot = knobSlots[s];
                         sOct[s] = baseOct[s]; sRes[s] = slot.resonance; sDrive[s] = slot.drive;
                         sEnvAmt[s] = slot.envAmount; sChar[s] = slot.character;
                     }
@@ -315,9 +347,14 @@ public:
             // Smooth every continuous filter and tuning setting sample by
             // sample (about 5 ms), so knob moves, automation and modulation
             // glide instead of stepping ("zipper" noise).
+            const bool modMoving = modStepsLeft > 0;
+            if (modMoving) --modStepsLeft;
             for (int s = 0; s < 3; ++s)
             {
-                const auto& slot = cur.slots[s];
+                const auto& slot = knobSlots[s];
+                if (modMoving)
+                    for (int j = 0; j < numSlotMods; ++j)
+                        modNow[s][j] += modStep[s][j];
                 sOct[s]    += (baseOct[s]     - sOct[s])    * smoothCoef;
                 sRes[s]    += (slot.resonance - sRes[s])    * smoothCoef;
                 sDrive[s]  += (slot.drive     - sDrive[s])  * smoothCoef;
@@ -355,7 +392,9 @@ public:
             driftValue += (driftTarget - driftValue) * driftCoef;
             const double driftSemis = cur.drift * maxDriftCents * driftValue / 100.0;
 
-            const double pitch = currentNote + bendSemitones * cur.bendRange + driftSemis;
+            // Pitch bend glides over about 3 ms, so the wheel's steps can't be heard.
+            bendS += (bendSemitones - bendS) * bendGlideCoef;
+            const double pitch = currentNote + bendS * cur.bendRange + driftSemis;
             const double freq = 440.0 * std::pow (2.0, (pitch - 69.0) / 12.0);
             const double tune1 = std::exp2 (sTune1 / 12.0), tune2 = std::exp2 (sTune2 / 12.0);
             const double inc1 = juce::jmin (freq * tune1 / sr, 0.45);
@@ -363,51 +402,99 @@ public:
 
             // Each oscillator can push the other's phase (FM). Osc 2 -> 1
             // uses Osc 2's previous sample, which is how a feedback loop works.
-            const float o1 = osc1.next (inc1, sFm21 * fmDepthAtFull * osc2.getLastOut(), cur.osc[0], smoothCoef);
-            const float o2 = osc2.next (inc2, sFm12 * fmDepthAtFull * o1, cur.osc[1], smoothCoef);
+            // FM and ring mod create tones far above the top of hearing, which
+            // fold back down as harsh, out-of-tune grit. While either is in
+            // use, the two oscillators run at 4x the rate and are filtered
+            // back down, so those tones are removed instead of folding back.
+            if (! oscOversample && (sFm12 > 1.0e-4f || sFm21 > 1.0e-4f || sRing > 1.0e-4f
+                                    || cur.fm1to2 > 1.0e-4f || cur.fm2to1 > 1.0e-4f || cur.ringMod > 1.0e-4f))
+                oscOversample = true; // stays on until the note ends
+            float pair;
+            if (oscOversample)
+            {
+                float m[4];
+                for (int k = 0; k < 4; ++k)
+                {
+                    // The FM signals are softened above about 16 kHz first: a saw's
+                    // sudden jump would otherwise jerk the other oscillator's phase
+                    // and spray tones everywhere.
+                    fmLp21[0] += (osc2.getLastOut() - fmLp21[0]) * fmLpCoef; fmLp21[1] += (fmLp21[0] - fmLp21[1]) * fmLpCoef;
+                    const float a = osc1.next (inc1 * 0.25, sFm21 * fmDepthAtFull * fmLp21[1], cur.osc[0], smoothCoef4x);
+                    fmLp12[0] += (a - fmLp12[0]) * fmLpCoef; fmLp12[1] += (fmLp12[0] - fmLp12[1]) * fmLpCoef;
+                    const float b = osc2.next (inc2 * 0.25, sFm12 * fmDepthAtFull * fmLp12[1], cur.osc[1], smoothCoef4x);
+                    m[k] = sLvl1 * a + sLvl2 * b + sRing * a * b;
+                }
+                const float h0 = oscDown2.down (m[0], m[1]); // (in time order)
+                const float h1 = oscDown2.down (m[2], m[3]);
+                pair = oscDown1.down (h0, h1);
+            }
+            else
+            {
+                const float o1 = osc1.next (inc1, 0.0, cur.osc[0], smoothCoef);
+                const float o2 = osc2.next (inc2, 0.0, cur.osc[1], smoothCoef);
+                pair = sLvl1 * o1 + sLvl2 * o2;
+            }
             const float subOut = sSub > 1.0e-4f ? sub (inc1 * 0.5) : 0.0f;
             subPhase += inc1 * 0.5;
             if (subPhase >= 1.0) subPhase -= 1.0;
 
-            const float osc = 0.3f * (sLvl1 * o1 + sSub * subOut + sLvl2 * o2 + sRing * o1 * o2);
+            const float osc = 0.3f * (pair + sSub * subOut);
 
             // Filter rack: slots in series, in the chosen order.
             const float fenv = filterEnv.next();
             const float lfo = cur.lfo[0] != nullptr ? cur.lfo[0][pos] : 0.0f;
             const float lfoOct = lfo * cur.lfoToCutoff * lfoOctavesAtFull; // older projects' "LFO to Cutoff"
 
-            const float gain = ampEnv.next() * noteGain;
-            if (cur.taps[0] != nullptr) cur.taps[0][pos] += osc * gain;
+            // Velocity level glides over about 2 ms, so a stolen or retriggered
+            // voice that is still sounding doesn't jump to the new level (click).
+            noteGainS += (noteGain - noteGainS) * gainGlideCoef;
+            const float gain = ampEnv.next() * noteGainS;
+            if (cur.taps[0] != nullptr) cur.taps[0][pos] += osc;
 
             // The chain: Filters 1-3, Amp and EQ in the chosen order.
             float x = osc;
-            bool ampDone = false;
             for (int n = 0; n < Chain::numBlocks; ++n)
             {
                 const int b = cur.order[n];
                 if (Chain::isFilter (b))
                 {
                     auto slot = cur.slots[b];
-                    slot.resonance = sRes[b]; slot.drive = sDrive[b]; slot.character = sChar[b];
-                    const float cutoffOct = sOct[b] + fenv * sEnvAmt[b] * envOctavesAtFull + lfoOct;
+                    const auto& mb = modNow[b];
+                    slot.resonance = juce::jlimit (0.0f, 1.0f, sRes[b] + mb[1]);
+                    slot.drive     = juce::jlimit (0.0f, 1.0f, sDrive[b] + mb[2]);
+                    slot.character = juce::jlimit (0.0f, 1.0f, sChar[b] + mb[4]);
+                    const float cutoffOct = sOct[b] + mb[0] + fenv * (sEnvAmt[b] + mb[3]) * envOctavesAtFull + lfoOct;
                     lastCutoffHz[b] = std::exp2 (juce::jlimit (4.3f, 14.3f, cutoffOct));
                     x = filters[b].process (x, slot, lastCutoffHz[b]);
                 }
                 else if (b == Chain::amp)
                 {
                     x *= gain;
-                    ampDone = true;
                 }
                 else if (! eq.flat)
                 {
                     x = eq.process (x);
                 }
-                // The displays show each stage at the level you'd hear it.
-                if (cur.taps[n + 1] != nullptr) cur.taps[n + 1][pos] += ampDone ? x : x * gain;
+                // The Numbers view shows each stage as it really is, so the
+                // Amp column is where the envelope and velocity take effect.
+                if (cur.taps[n + 1] != nullptr) cur.taps[n + 1][pos] += x;
             }
             lastFreq = (float) (freq * tune1);
 
-            const float sample = x;
+            if (! std::isfinite (x))
+            {
+                // Something produced a broken number: clear this voice's
+                // filters, EQ and smoothing so it recovers instead of going
+                // silent for good.
+                recoverFromBadValue();
+                x = 0.0f;
+            }
+            // DC blocker (5 Hz high-pass): drive, resonance and ring mod can
+            // push the wave off-centre, which wastes headroom and thumps.
+            const float blocked = x - dcX1 + dcCoef * dcY1;
+            dcX1 = x;
+            dcY1 = blocked;
+            const float sample = blocked;
 
             for (int ch = 0; ch < numChannels; ++ch)
                 output.addSample (ch, pos, sample);
@@ -423,7 +510,38 @@ public:
         publishLiveInfo();
     }
 
+    // Stop at once and forget everything (DAW reset, sample-rate change).
+    void hardReset()
+    {
+        ampEnv.reset();
+        filterEnv.reset();
+        recoverFromBadValue();
+        noteGainS = noteGain;
+        bendS = bendSemitones;
+        oscOversample = false;
+        fmLp12[0] = fmLp12[1] = fmLp21[0] = fmLp21[1] = 0.0f;
+        if (isVoiceActive())
+            clearCurrentNote();
+    }
+
 private:
+    void recoverFromBadValue()
+    {
+        osc1.reset (shared.osc[0]);
+        osc2.reset (shared.osc[1]);
+        subPhase = 0.0;
+        for (auto& f : filters)
+            f.reset();
+        eq.reset();
+        sSub = shared.subLevel;
+        sFm12 = shared.fm1to2; sFm21 = shared.fm2to1; sRing = shared.ringMod;
+        sLvl1 = shared.osc[0].level; sLvl2 = shared.osc[1].level;
+        driftValue = 0.0f;
+        dcX1 = dcY1 = 0.0f;
+        oscDown1.reset(); oscDown2.reset();
+        snapSmoothing = true; // the next 16-sample update puts the rest back to the knob values
+    }
+
     // The newest note tells the screen what to draw.
     void publishLiveInfo()
     {
@@ -466,16 +584,25 @@ private:
         src[Mod::filterEnv] = filterEnv.level();
         src[Mod::ampEnv]    = ampEnv.level();
         src[Mod::velocity]  = noteVelocity;
-        src[Mod::modWheel]  = shared.mod != nullptr ? shared.mod->modWheel : 0.0f;
+        src[Mod::modWheel]  = shared.mod != nullptr ? shared.mod->modWheelAt (pos) : 0.0f;
         src[Mod::key]       = juce::jlimit (-1.0f, 1.0f, (float) (targetNote - 60) / 60.0f);
     }
 
     void refreshSettings (int pos)
     {
         cur = shared;
+        for (int s = 0; s < 3; ++s)
+            knobSlots[s] = cur.slots[s];
         auto* m = shared.mod;
         if (m != nullptr)
         {
+            if (m->anyRamping) // DAW automation glides across the block
+                for (int t = 0; t < Mod::numTargets; ++t)
+                    if (m->ramping[(size_t) t])
+                        applyTarget (cur, t, m->baseRealAt (t, pos));
+            for (int s = 0; s < 3; ++s)
+                knobSlots[s] = cur.slots[s]; // before modulation
+
             float src[Mod::numSources];
             currentSources (pos, src);
 
@@ -497,7 +624,7 @@ private:
                 }
                 for (int t = 0; t < Mod::numTargets; ++t)
                     if (touched[t])
-                        applyTarget (cur, t, Mod::applyOffset (*m, t, offset[t]));
+                        applyTarget (cur, t, Mod::applyOffset (*m, t, offset[t], pos));
             }
         }
         applyEnvelopeSettings();
@@ -539,10 +666,17 @@ private:
     double currentNote   = 60.0;
     double glideStep     = 0.0;
     bool   gliding       = false;
-    double bendSemitones = 0.0;
+    double bendSemitones = 0.0, bendS = 0.0;
     Oscillator osc1, osc2;
     double subPhase = 0.0;
-    float  noteGain = 1.0f;
+    float  noteGain = 1.0f, noteGainS = 1.0f;
+    bool   oscOversample = false;
+    bool   needsRefresh = true;
+    float  baseOct[3] { 10.0f, 10.0f, 10.0f }; // cutoff targets in octaves, kept between blocks   // FM / ring mod: oscillators at 4x
+    Halfband oscDown1, oscDown2;
+    float  smoothCoef4x = 0.001f, fmLpCoef = 0.4f;
+    float  fmLp12[2] {}, fmLp21[2] {}; // FM signal softening (two gentle low-pass stages at 4x)
+    float  dcX1 = 0.0f, dcY1 = 0.0f; // DC blocker state
     int    noteSerial = 0;
     float  lastFreq = 0.0f;
     float  lastCutoffHz[3] = { 1000.0f, 1000.0f, 1000.0f };
@@ -550,6 +684,12 @@ private:
     float smoothCoef = 0.01f, blockSmoothCoef = 0.2f;
     bool  snapSmoothing = true;
     float sOct[3] { 10.0f, 10.0f, 10.0f }, sRes[3] {}, sDrive[3] {}, sEnvAmt[3] {}, sChar[3] {};
+    // Filter modulation, kept apart from the knob smoothing: cutoff (octaves),
+    // resonance, drive, env amount, type knob.
+    static constexpr int numSlotMods = 5;
+    FilterSlotSettings knobSlots[3];
+    float modNow[3][numSlotMods] {}, modStep[3][numSlotMods] {};
+    int modStepsLeft = 0;
     float sTune1 = 0.0f, sTune2 = 0.0f;
     float sEq[3] {};
     float sSub = 0.0f, sFm12 = 0.0f, sFm21 = 0.0f, sRing = 0.0f, sLvl1 = 1.0f, sLvl2 = 0.0f;

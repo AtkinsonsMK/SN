@@ -89,6 +89,7 @@ public:
     void paint (juce::Graphics&) override;
     void mouseDown (const juce::MouseEvent&) override;
     void mouseDrag (const juce::MouseEvent&) override;
+    void mouseUp (const juce::MouseEvent&) override;
     juce::Rectangle<float> cellBounds (int drum, int step) const;
 
 private:
@@ -136,6 +137,8 @@ public:
     static constexpr int colAWidth = 940, colBWidth = 300;
 
     SNSynthProcessor& getProcessor() { return processor; }
+    // For the checks: run one screen update and count what it asked to redraw.
+    int tickForChecks() { redrawRequests = 0; timerCallback(); return redrawRequests; }
     int getSelectedSource() const { return modSource; }
     juce::String targetName (int target) const;
     void modulationChanged(); // repaint rings and the list
@@ -155,6 +158,8 @@ private:
     void layoutGroup (KnobGroup&, juce::Rectangle<int> area, int topExtra = 0);
     bool keyPressed (const juce::KeyPress&, juce::Component*) override;
     bool keyStateChanged (bool isKeyDown, juce::Component*) override;
+    static bool isNoteKey (const juce::KeyPress&);
+    bool canStartKeyNotes() const;
     bool handleKeyPress (const juce::KeyPress&);
     bool updateHeldKeys();
     void shiftOctave (int delta);
@@ -218,6 +223,10 @@ private:
     std::vector<juce::Rectangle<int>> dividers;
     std::vector<ModRing*> rings;
     float matrixChecksum = 0.0f;
+    std::uint64_t drawnSignature = 0;   // settings the screen was last drawn from
+    bool wasSounding = true;
+    int drawnVoiceCount = -1, drawnDrumStep = -2;
+    int redrawRequests = 0;
     juce::MidiKeyboardComponent keyboard;
     juce::Label octaveLabel;
     juce::Label hintLabel;

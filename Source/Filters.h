@@ -236,6 +236,7 @@ public:
         stage2.design (keep / (4.0 * sampleRate));
         combBuffer.assign ((size_t) (sampleRate * 4.0f * 0.06f) + 4, 0.0f); // down to about 17 Hz at 4x
         gateAttackCoef = 1.0f - std::exp (-1.0f / (0.003f * sampleRate));
+        driveLevelCoef = 1.0f - std::exp (-1.0f / (0.03f * sampleRate));
         reset();
     }
 
@@ -251,6 +252,7 @@ public:
         stage2.reset();
         gateLevel = 0.0f;
         gateHoldSamples = 0;
+        drivePow0 = drivePow1 = 0.0f;
     }
 
     // Called when a voice starts a note (the Lowpass Gate is "struck").
@@ -283,7 +285,27 @@ public:
             setOversampling (s.oversample);
 
         const float driveGain = 1.0f + s.drive * 15.0f;     // up to about +24 dB into the circuit
-        const float makeup    = 1.0f / (1.0f + s.drive * 2.5f);
+        // Loudness makeup for Drive: compare how loud the input stage would
+        // be without Drive and with it (both through the same saturation,
+        // averaged over ~30 ms) and turn the result back by the difference.
+        // So Drive changes the tone and grit, not the volume.
+        const float s0 = FilterMath::sat (x), s1 = FilterMath::sat (x * driveGain);
+        drivePow0 += (s0 * s0 - drivePow0) * driveLevelCoef;
+        drivePow1 += (s1 * s1 - drivePow1) * driveLevelCoef;
+        float makeup = 1.0f;
+        if (s.drive > 0.0f)
+        {
+            makeup = std::sqrt ((drivePow0 + 1.0e-9f) / (drivePow1 + 1.0e-9f));
+            // Three circuits change level inside the loop too; trim them
+            // (measured: OTA gets about 3.5 dB louder, Steiner-Parker 4 dB and
+            // Polivoks 2.5 dB quieter at full Drive).
+            const float u = 1.0f - s.drive;
+            float trimDb = 0.0f;
+            if (s.type == FilterType::ota)                trimDb = -3.5f * (1.0f - u * u);
+            else if (s.type == FilterType::steinerParker) trimDb =  4.0f * (1.0f - u * u * u * u);
+            else if (s.type == FilterType::polivoks)      trimDb =  2.5f * (1.0f - u * u);
+            makeup *= std::exp2 (trimDb * 0.16609640f); // dB to gain
+        }
         const float g = FilterMath::tptGain (cutoffHz, osRate);
         currentCutoffHz = cutoffHz;
 
@@ -408,7 +430,8 @@ private:
                 const int n = (int) combBuffer.size();
                 float readPos = (float) combWrite - delay;
                 if (readPos < 0.0f) readPos += (float) n;
-                const int i0 = (int) readPos;
+                // Rounding can land readPos exactly on n (e.g. -1e-7 + n), so wrap the index too.
+                const int i0 = std::clamp ((int) readPos, 0, n - 1);
                 const float frac = readPos - (float) i0;
                 const float d = combBuffer[(size_t) i0] * (1.0f - frac) + combBuffer[(size_t) ((i0 + 1) % n)] * frac;
                 const float y = sat (x + fb * d);
@@ -495,4 +518,5 @@ private:
     float gateLevel = 0.0f;
     float gateAttackCoef = 0.1f;
     int   gateHoldSamples = 0;
+    float drivePow0 = 0.0f, drivePow1 = 0.0f, driveLevelCoef = 0.001f; // Drive loudness makeup
 };

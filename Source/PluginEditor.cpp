@@ -1,3 +1,4 @@
+#include <cstring>
 #include "PluginEditor.h"
 #include "Parameters.h"
 #include "Filters.h"
@@ -147,7 +148,7 @@ SNSynthEditor::SNSynthEditor (SNSynthProcessor& p)
 
     limiterButton.setTooltip ("Output Limiter: keeps the output just under 0 dB by turning loud peaks down smoothly. "
                               "Even when off, a safety ceiling stops anything above -0.3 dB (it clips instead).");
-    voiceCompButton.setTooltip ("Voice Gain Compensation: turns the sum down as more notes play, so chords don't jump in level");
+    voiceCompButton.setTooltip ("Voice Gain Compensation: fixed headroom for chords, set by the Voices knob (up to -6 dB). Held notes never duck when you add notes.");
     for (auto* b : { &limiterButton, &voiceCompButton })
     {
         b->setWantsKeyboardFocus (false);
@@ -339,10 +340,48 @@ void SNSynthEditor::timerCallback()
         if (auto* peer = getPeer(); peer != nullptr && peer->isFocused() && juce::Process::isForegroundProcess())
             grabKeyboardFocus();
 
+    // Redraw only what changed. One fingerprint covers every setting the
+    // pictures are drawn from: all controls, the routings, the chain order,
+    // the selected mod source and any drum-grid edit or loaded save.
+    std::uint64_t sig = 1469598103934665603ull;
+    auto mix = [&sig] (std::uint32_t v) { sig = (sig ^ v) * 1099511628211ull; };
+    auto mixFloat = [&mix] (float f) { std::uint32_t u; std::memcpy (&u, &f, sizeof u); mix (u); };
+    for (auto* prm : processor.getParameters())
+        mixFloat (prm->getValue());
+    for (int src = 0; src < Mod::numSources; ++src)
+        for (int t = 0; t < Mod::numTargets; ++t)
+            mixFloat (processor.modMatrix.get (src, t));
+    for (int b : processor.getChainOrder()) mix ((std::uint32_t) b);
+    mix ((std::uint32_t) (modSource + 1));
+    mix ((std::uint32_t) processor.uiStateEpoch.load());
+    const bool settingsChanged = sig != drawnSignature;
+    drawnSignature = sig;
+
+    // Pictures that follow the playing notes keep moving while anything
+    // sounds, plus one more frame to settle at rest.
+    const int voicesNow = processor.getActiveVoiceCount();
+    const bool sounding = voicesNow > 0 || processor.live.noteActive.load();
+    const bool animate = sounding || wasSounding;
+    wasSounding = sounding;
+
     for (auto* d : displays)
-        d->repaint();
-    outputMeter.tick();
-    content.repaint (0, 0, baseW, 60); // "n playing" in the header
+    {
+        const auto* vd = dynamic_cast<Vis::Display*> (d);
+        const auto motion = vd != nullptr ? vd->motion() : Vis::Display::Motion::always;
+        if (settingsChanged || motion == Vis::Display::Motion::always
+            || (motion == Vis::Display::Motion::whilePlaying && animate))
+        {
+            d->repaint();
+            ++redrawRequests;
+        }
+    }
+    outputMeter.tick(); // redraws itself only when the reading moves
+    if (voicesNow != drawnVoiceCount)
+    {
+        drawnVoiceCount = voicesNow;
+        content.repaint (0, 0, baseW, 60); // "n playing" in the header
+        ++redrawRequests;
+    }
 
     // Redraw rings and the list when routings change (also from loading a project).
     float sum = 0.0f;
@@ -354,17 +393,28 @@ void SNSynthEditor::timerCallback()
         matrixChecksum = sum;
         modulationChanged();
     }
-    // Rings follow their knob's value; cheap to repaint the ones in use.
-    for (auto* r : rings)
-        r->repaint();
 
     for (auto& sp : slots)
         updateSlotTypeDisplay (sp);
 
-    chainStrip.repaint();
+    if (settingsChanged)
+    {
+        // Rings follow their knob's value and routings; the chain strip
+        // shows the order and filter types.
+        for (auto* r : rings)
+            r->repaint();
+        chainStrip.repaint();
+        redrawRequests += (int) rings.size() + 1;
+    }
 
     // Drums: the playing step, and each drum's name lights up when it plays.
-    drumGrid.repaint();
+    const int stepNow = processor.drumStep.load();
+    if (settingsChanged || stepNow != drawnDrumStep)
+    {
+        drawnDrumStep = stepNow;
+        drumGrid.repaint();
+        ++redrawRequests;
+    }
     drumPlayButton.setButtonText (drumPlayButton.getToggleState() ? "Stop" : "Play");
     for (int d = 0; d < Drums::numDrums; ++d)
     {
@@ -483,7 +533,13 @@ bool SNSynthEditor::handleKeyPress (const juce::KeyPress& key)
     if (mods.isCommandDown() || mods.isCtrlDown() || mods.isAltDown())
         return false;
 
-    // Space starts and stops the drum machine.
+    // Inside a DAW, Space and every key that isn't a note belong to the
+    // DAW (play/stop and its other shortcuts), so hand them back.
+    const bool inDaw = processor.wrapperType != juce::AudioProcessor::wrapperType_Standalone;
+    if (inDaw && ! isNoteKey (key))
+        return false;
+
+    // Space starts and stops the drum machine (standalone app only).
     if (key.getKeyCode() == juce::KeyPress::spaceKey)
     {
         if (! spaceHeld)
@@ -501,6 +557,33 @@ bool SNSynthEditor::handleKeyPress (const juce::KeyPress& key)
     return true;
 }
 
+bool SNSynthEditor::isNoteKey (const juce::KeyPress& key)
+{
+    const auto c = juce::CharacterFunctions::toLowerCase (key.getTextCharacter());
+    for (const auto& k : noteKeys)
+        if (c == (juce::juce_wchar) k.key)
+            return true;
+    return false;
+}
+
+// New notes start only while an SN window is the active one and nobody is
+// typing into a text box. (Keys are read directly from the keyboard, so
+// without this, typing "250" into a knob's box played three notes, and two
+// open SN windows both played.)
+bool SNSynthEditor::canStartKeyNotes() const
+{
+    if (! juce::Process::isForegroundProcess())
+        return false;
+    if (dynamic_cast<juce::TextEditor*> (juce::Component::getCurrentlyFocusedComponent()) != nullptr)
+        return false;
+    auto windowActive = [] (const juce::Component* c)
+    {
+        auto* peer = c != nullptr ? c->getPeer() : nullptr;
+        return peer != nullptr && peer->isFocused();
+    };
+    return windowActive (this) || windowActive (numbersWindow.get());
+}
+
 bool SNSynthEditor::updateHeldKeys()
 {
     if (spaceHeld && ! juce::KeyPress (juce::KeyPress::spaceKey).isCurrentlyDown())
@@ -512,7 +595,7 @@ bool SNSynthEditor::updateHeldKeys()
         const bool down = juce::KeyPress ((int) noteKeys[i].key).isCurrentlyDown();
         auto& held = heldNotes[i];
 
-        if (down && held < 0)
+        if (down && held < 0 && canStartKeyNotes())
         {
             held = 12 * (baseOctave + 1) + noteKeys[i].semitone; // octave 3: Z = C3 = MIDI 48
             if (held <= 127)
@@ -984,6 +1067,8 @@ void ModRing::mouseDrag (const juce::MouseEvent& e)
 
 void ModRing::mouseUp (const juce::MouseEvent&)
 {
+    if (dragging)
+        editor.getProcessor().markStateChanged(); // so the DAW knows to save it
     dragging = false;
     repaint();
 }
@@ -994,6 +1079,7 @@ void ModRing::mouseDoubleClick (const juce::MouseEvent&)
     if (s < 0) return;
     editor.getProcessor().modMatrix.set (s, target, 0.0f);
     editor.modulationChanged();
+    editor.getProcessor().markStateChanged();
 }
 
 //==============================================================================
@@ -1069,6 +1155,7 @@ void ModList::mouseUp (const juce::MouseEvent& e)
     {
         editor.getProcessor().modMatrix.set (row.source, row.target, 0.0f); // remove
         editor.modulationChanged();
+        editor.getProcessor().markStateChanged();
     }
 }
 
@@ -1253,6 +1340,11 @@ void DrumGrid::mouseDown (const juce::MouseEvent& e)
     lastDrum = d;
     lastStep = s;
     repaint();
+}
+
+void DrumGrid::mouseUp (const juce::MouseEvent&)
+{
+    processor.markStateChanged(); // so the DAW knows the pattern changed and saves it
 }
 
 void DrumGrid::mouseDrag (const juce::MouseEvent& e)

@@ -555,7 +555,15 @@ void OutputMeter::tick()
     rmsDb  = toDb (rms);
     if (peakDb >= holdDb) { holdDb = peakDb; holdFrames = 45; }
     else if (--holdFrames <= 0) holdDb = juce::jmax (peakDb, holdDb - 1.0f);
-    repaint();
+
+    // Redraw only when the picture changes (to a tenth of a dB on the scale).
+    auto q = [] (float db) { return juce::jlimit (0, 1000, (int) std::lround ((juce::jmax (db, meterFloorDb - 1.0f) - meterFloorDb + 1.0f) * 10.0f)); };
+    const juce::int64 key = (((juce::int64) q (rmsDb) * 1001 + q (peakDb)) * 1001 + q (holdDb)) * 2 + (clip ? 1 : 0);
+    if (key != drawnKey)
+    {
+        drawnKey = key;
+        repaint();
+    }
 }
 
 void OutputMeter::mouseDown (const juce::MouseEvent&)
@@ -563,6 +571,7 @@ void OutputMeter::mouseDown (const juce::MouseEvent&)
     clip = false;
     processor.live.outClipped.store (false);
     holdDb = peakDb;
+    drawnKey = -1;
     repaint();
 }
 

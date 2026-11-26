@@ -6,14 +6,24 @@ SNSynthProcessor::SNSynthProcessor()
     : AudioProcessor (BusesProperties().withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
       parameters (*this, nullptr, "SNSynthState", Params::createLayout())
 {
+    // Start every note at its exact sample (JUCE's default groups notes
+    // within 32 samples), so the buffer size never shifts a note.
+    synth.setMinimumRenderingSubdivisionSize (1, true);
     volumeParam = parameters.getRawParameterValue (ParamIDs::volume);
+    ampReleaseParam = parameters.getRawParameterValue (ParamIDs::aenvRelease);
 
     for (int i = 0; i < 3; ++i)
     {
         auto get = [&] (const char* c) { return parameters.getRawParameterValue (ParamIDs::slot (i, c)); };
         slotParams[(size_t) i] = { get (ParamIDs::slotType), get (ParamIDs::slotCutoff), get (ParamIDs::slotResonance),
-                                   get (ParamIDs::slotDrive), get (ParamIDs::slotEnv), get (ParamIDs::slotCharacter) };
+                                   get (ParamIDs::slotDrive), get (ParamIDs::slotEnv), get (ParamIDs::slotCharacter),
+                                   get (ParamIDs::slotLevelMatch) };
     }
+
+    for (auto* param : getParameters())
+        if (auto* ranged = dynamic_cast<juce::RangedAudioParameter*> (param))
+            safeParams.push_back ({ parameters.getRawParameterValue (ranged->getParameterID()),
+                                    ranged->convertFrom0to1 (ranged->getDefaultValue()) });
     setChainOrder (Chain::defaultOrder());
 
     for (int t = 0; t < Mod::numTargets; ++t)
@@ -45,17 +55,24 @@ float SNSynthProcessor::volumeDbToGain (float db)
 
 void SNSynthProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
+    gridClock = 0;
+    lfoNeedsUpdate = true;
+    silenceAllVoices(); // a note left over from the old rate would restart from a stale level
     currentSampleRate = sampleRate;
     for (auto& b : lfoBuffers)
         b.assign ((size_t) juce::jmax (samplesPerBlock, 512), 0.0f);
-    limiterRelease = std::exp (-1.0f / (0.15f * (float) sampleRate));
-    limiterEnv = 0.0f;
+    limiter.prepare (sampleRate);
+    setLatencySamples (limiter.latency()); // the limiter's look-ahead, on or off
+    drumDcCoef = (float) std::exp (-2.0 * juce::MathConstants<double>::pi * 5.0 / sampleRate);
+    drumDcX1 = drumDcY1 = 0.0f;
     voiceComp.reset (sampleRate, 0.05);
     voiceComp.setCurrentAndTargetValue (1.0f);
     for (auto& t : tapBuffers)
         t.assign ((size_t) juce::jmax (samplesPerBlock, 512), 0.0f);
+    synthOutTap.assign ((size_t) juce::jmax (samplesPerBlock, 512), 0.0f);
     voiceSettings.live = &live;
     voiceSettings.lastNote = -1.0;
+    rampFromLastBlock = false;
     updateVoiceSettings();
     synth.setCurrentPlaybackSampleRate (sampleRate);
     keyboardState.reset();
@@ -98,7 +115,25 @@ void SNSynthProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
     keyboardState.processNextMidiBuffer (midi, 0, buffer.getNumSamples(), true);
 
     const int n = buffer.getNumSamples();
+    repairBadParameterValues();
+    modContext.invBlockLen = n > 0 ? 1.0f / (float) n : 0.0f;
+    rampFromLastBlock = true;
     updateVoiceSettings();
+    // Mod wheel (MIDI CC 1), each move at its own sample.
+    modContext.wheelAtStart = modContext.modWheel;
+    modContext.numWheelEvents = 0;
+    for (const auto meta : midi)
+    {
+        const auto msg = meta.getMessage();
+        if (msg.isController() && msg.getControllerNumber() == 1)
+        {
+            modContext.modWheel = (float) msg.getControllerValue() / 127.0f;
+            if (modContext.numWheelEvents < Mod::Context::maxWheelEvents)
+                modContext.wheelEvents[(size_t) modContext.numWheelEvents++] = { meta.samplePosition, modContext.modWheel };
+        }
+    }
+
+    modContext.gridOffset = (int) (gridClock & 15);
     renderLfo (n);
 
     for (size_t t = 0; t < tapBuffers.size(); ++t)
@@ -108,14 +143,8 @@ void SNSynthProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
         std::fill (tapBuffers[t].begin(), tapBuffers[t].begin() + n, 0.0f);
         voiceSettings.taps[t] = tapBuffers[t].data();
     }
-
-    // Mod wheel (MIDI CC 1)
-    for (const auto meta : midi)
-    {
-        const auto msg = meta.getMessage();
-        if (msg.isController() && msg.getControllerNumber() == 1)
-            modContext.modWheel = (float) msg.getControllerValue() / 127.0f;
-    }
+    if ((int) synthOutTap.size() < n)
+        synthOutTap.resize ((size_t) n); // only if the host exceeds its announced block size
 
     synth.renderNextBlock (buffer, midi, 0, n);
     renderDrums (n);
@@ -123,31 +152,45 @@ void SNSynthProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
     const int numSamples  = buffer.getNumSamples();
     const int numChannels = buffer.getNumChannels();
 
-    // Voice Gain Compensation: turns the sum down as more notes play
-    // (1 / square root of the number of notes), so chords don't jump in level.
+    // Voice Gain Compensation: fixed headroom for chords, set by the Voices
+    // knob (1 voice 0 dB, 2 voices -3 dB, 3 voices -4.8 dB, 4 or more -6 dB).
+    // It no longer follows how many notes are sounding, so a held note never
+    // ducks or swells as other notes come and go.
     {
         const bool comp = p (ParamIDs::voiceGainComp)->load() > 0.5f;
-        const int playing = synth.countActiveVoices();
-        voiceComp.setTargetValue (comp ? 1.0f / std::sqrt ((float) juce::jmax (1, playing)) : 1.0f);
+        const float voices = juce::jlimit (1.0f, 4.0f, p (ParamIDs::voices)->load());
+        voiceComp.setTargetValue (comp ? 1.0f / std::sqrt (voices) : 1.0f);
     }
 
     // Volume and the limiter run in short chunks so Volume can follow its modulation.
     const bool limiterOn = p (ParamIDs::limiter)->load() > 0.5f;
-    for (int start = 0; start < numSamples; start += globalModInterval)
+    for (int start = 0, len = 0; start < numSamples; start += len)
     {
-        const int len = juce::jmin (globalModInterval, numSamples - start);
+        // Chunks follow the fixed grid, so the buffer size can't change the sound.
+        len = juce::jmin (globalModInterval - (int) ((gridClock + (juce::uint64) start) % (juce::uint64) globalModInterval), numSamples - start);
 
-        const float volDb = globalVolumeDb (start);
-
-        outputGain.setTargetValue (volumeDbToGain (volDb));
+        // Volume: the knob (and its automation) goes through the smoother;
+        // modulation (e.g. an LFO tremolo) is added after it, gliding in a
+        // straight line between chunks, so fast tremolo keeps its full depth.
+        const float knobDb = modContext.baseRealAt (Mod::volume, start);
+        const float modDb = globalVolumeDb (start) - knobDb;
+        const float modDbStep = (modDb - volModDbNow) / (float) len;
+        outputGain.setTargetValue (volumeDbToGain (knobDb));
         for (int i = start; i < start + len; ++i)
         {
+            volModDbNow += modDbStep;
+            const float volMod = std::abs (volModDbNow) > 1.0e-6f ? juce::Decibels::decibelsToGain (volModDbNow) : 1.0f;
             // Voice Gain Comp is for the keyboard notes only; the drums join
             // after it, then Volume turns both up or down.
             const float vc = voiceComp.getNextValue();
-            const float og = outputGain.getNextValue();
+            const float og = outputGain.getNextValue() * volMod;
             const float drums = drumOut[(size_t) i];
             float peak = 0.0f;
+            if (numChannels > 0)
+            {
+                const float synthOnly = buffer.getReadPointer (0)[i] * vc * og;
+                synthOutTap[(size_t) i] = std::isfinite (synthOnly) ? synthOnly : 0.0f;
+            }
             for (int ch = 0; ch < numChannels; ++ch)
             {
                 auto& x = buffer.getWritePointer (ch)[i];
@@ -159,21 +202,19 @@ void SNSynthProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
             if (peak > 1.0f)
                 live.outClipped.store (true); // would have gone over 0 dB
 
-            // Output Limiter: holds the output just under 0 dB. It reacts
-            // instantly to peaks and lets go over about 150 ms.
-            if (limiterOn)
+            // Output Limiter: looks 1.5 ms ahead and watches the peaks between
+            // samples, so it eases the level down before a peak instead of
+            // bending the wave (see Limiter.h). Lets go over about 150 ms.
             {
-                limiterEnv = juce::jmax (peak, limiterEnv * limiterRelease);
-                if (limiterEnv > limiterCeiling)
-                {
-                    const float lg = limiterCeiling / limiterEnv;
-                    for (int ch = 0; ch < numChannels; ++ch)
-                        buffer.getWritePointer (ch)[i] *= lg;
+                float frame[TruePeakLimiter::maxChannels] {};
+                const int nch = juce::jmin (numChannels, TruePeakLimiter::maxChannels);
+                for (int ch = 0; ch < nch; ++ch) frame[ch] = buffer.getReadPointer (ch)[i];
+                const float lg = limiter.process (frame, nch, limiterOn);
+                for (int ch = 0; ch < nch; ++ch) buffer.getWritePointer (ch)[i] = frame[ch];
+                synthOutTap[(size_t) i] *= lg; // the display isn't delayed; close enough to show the effect
+                if (lg < 0.999f)
                     live.limiting.store (true);
-                }
             }
-            else
-                limiterEnv = 0.0f;
 
             // Safety ceiling, always on even with the Limiter off: nothing
             // leaves the synth above -0.3 dB. With the Limiter off, loud
@@ -212,18 +253,30 @@ void SNSynthProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
 
     // Feed the displays.
     int w = live.writePos.load (std::memory_order_relaxed);
-    const float* out = numChannels > 0 ? buffer.getReadPointer (0) : nullptr;
+    // The Output column is the keyboard notes alone (after Voice Gain Comp,
+    // Volume and the Limiter), so it lines up with the stages before it; the
+    // drums are mixed in at the same point but not shown here.
     for (int i = 0; i < numSamples; ++i)
     {
         auto& f = live.ring[(size_t) (w & (LiveInfo::ringSize - 1))];
         for (size_t t = 0; t < tapBuffers.size(); ++t)
             f.v[t] = tapBuffers[t][(size_t) i];
-        f.v[LiveInfo::numStages - 1] = out != nullptr ? out[i] : 0.0f;
+        f.v[LiveInfo::numStages - 1] = juce::jlimit (-limiterCeiling, limiterCeiling, synthOutTap[(size_t) i]);
         ++w;
     }
     live.writePos.store (w & 0x3fffffff, std::memory_order_release);
     live.lfoPhase.store ((float) lfoPhases[0]);
     live.lfo2Phase.store ((float) lfoPhases[1]);
+    gridClock += (juce::uint64) numSamples;
+}
+
+void SNSynthProcessor::repairBadParameterValues()
+{
+    // A broken number in one control would spread through the filters and
+    // silence everything until reload. Put that control back to its default.
+    for (auto& sp : safeParams)
+        if (! std::isfinite (sp.value->load (std::memory_order_relaxed)))
+            sp.value->store (sp.fallback, std::memory_order_relaxed);
 }
 
 void SNSynthProcessor::updateVoiceSettings()
@@ -233,11 +286,17 @@ void SNSynthProcessor::updateVoiceSettings()
 
     // Every modulatable knob: plain value into the settings, and its
     // position for the modulation.
+    m.anyRamping = false;
     for (int t = 0; t < Mod::numTargets; ++t)
     {
         const float real = targetParams[(size_t) t]->load();
+        const float norm = m.ranges[(size_t) t].convertTo0to1 (real);
+        m.prevReal[(size_t) t] = rampFromLastBlock ? m.baseReal[(size_t) t] : real;
+        m.prevNorm[(size_t) t] = rampFromLastBlock ? m.baseNorm[(size_t) t] : norm;
+        m.ramping[(size_t) t] = std::abs (m.prevReal[(size_t) t] - real) > 0.0f;
+        m.anyRamping = m.anyRamping || m.ramping[(size_t) t];
         m.baseReal[(size_t) t] = real;
-        m.baseNorm[(size_t) t] = m.ranges[(size_t) t].convertTo0to1 (real);
+        m.baseNorm[(size_t) t] = norm;
         applyTarget (v, t, real);
     }
 
@@ -266,12 +325,13 @@ void SNSynthProcessor::updateVoiceSettings()
     {
         auto& slot = v.slots[i];
         slot.type       = (int) slotParams[i].type->load();
-        slot.levelMatch = parameters.getRawParameterValue (ParamIDs::slot ((int) i, ParamIDs::slotLevelMatch))->load() > 0.5f;
+        slot.levelMatch = slotParams[i].levelMatch->load() > 0.5f; // cached: building the name here allocated memory
         slot.oversample = os;
     }
 
+    const auto order = unpackOrder (packedChainOrder.load (std::memory_order_acquire));
     for (size_t i = 0; i < (size_t) Chain::numBlocks; ++i)
-        v.order[i] = chainOrder[i].load();
+        v.order[i] = order[i];
 
     synth.setVoiceLimit ((int) p (ParamIDs::voices)->load());
 }
@@ -362,6 +422,7 @@ void SNSynthProcessor::renderDrums (int numSamples)
                         hitDrum (d);
             }
         }
+        bool anyDrumActive = false;
         for (int d = 0; d < Drums::numDrums; ++d)
         {
             auto& v = drumVoices[(size_t) d];
@@ -369,20 +430,27 @@ void SNSynthProcessor::renderDrums (int numSamples)
             auto& lvl = drumLevelSmooth[(size_t) d];
             lvl += (ds.level - lvl) * drumSmoothCoef;
             if (v.isActive())
+            {
+                anyDrumActive = true;
                 drumBus[(size_t) ds.route][(size_t) i] += v.next() * lvl * drumGain;
+            }
         }
 
         // Filter and EQ settings for the drums: the knobs, moved by the LFOs
         // and the mod wheel (the drums have no envelopes, velocity or key).
-        if (i % SynthVoice::modInterval == 0)
+        if (m.onGrid (i))
         {
             drumCur = voiceSettings;
+            if (m.anyRamping) // automation glides across the block
+                for (int t = 0; t < Mod::numTargets; ++t)
+                    if (m.ramping[(size_t) t])
+                        applyTarget (drumCur, t, m.baseRealAt (t, i));
             if (anyDrumRoutes)
             {
                 float src[Mod::numSources] {};
                 src[Mod::lfo1] = lfoBuffers[0][(size_t) i];
                 src[Mod::lfo2] = lfoBuffers[1][(size_t) i];
-                src[Mod::modWheel] = m.modWheel;
+                src[Mod::modWheel] = m.modWheelAt (i);
                 float offset[Mod::numTargets] {};
                 bool touched[Mod::numTargets] {};
                 for (int r = 0; r < m.numRoutes; ++r)
@@ -397,13 +465,33 @@ void SNSynthProcessor::renderDrums (int numSamples)
                 }
                 for (int t = 0; t < Mod::numTargets; ++t)
                     if (touched[t])
-                        applyTarget (drumCur, t, Mod::applyOffset (m, t, offset[t]));
+                        applyTarget (drumCur, t, Mod::applyOffset (m, t, offset[t], i));
             }
             const float eqGlide = 1.0f - std::pow (1.0f - drumSmoothCoef, (float) SynthVoice::modInterval);
             drumEqDb[0] += (drumCur.eqLowDb  - drumEqDb[0]) * eqGlide;
             drumEqDb[1] += (drumCur.eqMidDb  - drumEqDb[1]) * eqGlide;
             drumEqDb[2] += (drumCur.eqHighDb - drumEqDb[2]) * eqGlide;
             drumEq.update (currentSampleRate, drumEqDb[0], drumEqDb[1], drumEqDb[2]);
+        }
+
+        if (anyDrumActive && drumsResting)
+        {
+            // Waking up: the filters start clean, already at their settings.
+            drumsResting = false;
+            drumQuietRun = 0;
+            for (int b = 0; b < 3; ++b)
+            {
+                const auto& slot = drumCur.slots[b];
+                drumSmooth[(size_t) b] = { std::log2 (juce::jmax (1.0f, slot.cutoffHz)), slot.resonance, slot.drive, slot.character };
+            }
+            for (int e = 0; e < 3; ++e)
+                drumEqDb[(size_t) e] = e == 0 ? drumCur.eqLowDb : (e == 1 ? drumCur.eqMidDb : drumCur.eqHighDb);
+            drumEq.update (currentSampleRate, drumEqDb[0], drumEqDb[1], drumEqDb[2]);
+        }
+        if (drumsResting)
+        {
+            drumOut[(size_t) i] = 0.0f; // nothing playing: the filters sleep
+            continue;
         }
 
         float x = 0.0f;
@@ -427,7 +515,36 @@ void SNSynthProcessor::renderDrums (int numSamples)
             else if (b == Chain::eq && ! drumEq.flat)
                 x = drumEq.process (x);
         }
+        if (! std::isfinite (x))
+        {
+            // A filter went bad: clear the drums' filters and EQ so they recover.
+            for (auto& f : drumFilters) f.reset();
+            drumEq.reset();
+            drumSmooth = {};
+            drumDcX1 = drumDcY1 = 0.0f;
+            x = 0.0f;
+        }
+        // DC blocker (5 Hz) on the filtered drums, as on the voices.
+        const float blocked = x - drumDcX1 + drumDcCoef * drumDcY1;
+        drumDcX1 = x;
+        drumDcY1 = blocked;
+        x = blocked;
         drumOut[(size_t) i] = x + drumBus[0][(size_t) i];
+
+        // Once no drum is playing and the filters' ring has died away
+        // (under -140 dB for 100 ms), let them sleep.
+        if (! anyDrumActive && std::abs (x) < 1.0e-7f)
+        {
+            if (++drumQuietRun >= (int) (0.1 * currentSampleRate))
+            {
+                drumsResting = true;
+                for (auto& f : drumFilters) f.reset();
+                drumEq.reset();
+                drumDcX1 = drumDcY1 = 0.0f;
+            }
+        }
+        else
+            drumQuietRun = 0;
     }
 }
 
@@ -443,21 +560,18 @@ float SNSynthProcessor::globalVolumeDb (int pos)
             src[s] = m.newestSources[(size_t) s];
         src[Mod::lfo1] = lfoBuffers[0][(size_t) pos];
         src[Mod::lfo2] = lfoBuffers[1][(size_t) pos];
-        src[Mod::modWheel] = m.modWheel;
+        src[Mod::modWheel] = m.modWheelAt (pos);
 
         for (int r = 0; r < m.numRoutes; ++r)
             if (m.routes[(size_t) r].target == Mod::volume)
                 offset += src[m.routes[(size_t) r].source] * m.routes[(size_t) r].amount;
     }
-    return std::abs (offset) > 1.0e-7f ? Mod::applyOffset (m, Mod::volume, offset) : m.baseReal[(size_t) Mod::volume];
+    return std::abs (offset) > 1.0e-7f ? Mod::applyOffset (m, Mod::volume, offset, pos) : m.baseRealAt (Mod::volume, pos);
 }
 
 std::array<int, Chain::numBlocks> SNSynthProcessor::getChainOrder() const
 {
-    std::array<int, Chain::numBlocks> o {};
-    for (size_t i = 0; i < o.size(); ++i)
-        o[i] = chainOrder[i].load();
-    return o;
+    return unpackOrder (packedChainOrder.load (std::memory_order_acquire));
 }
 
 void SNSynthProcessor::setChainOrder (std::array<int, Chain::numBlocks> order)
@@ -468,8 +582,7 @@ void SNSynthProcessor::setChainOrder (std::array<int, Chain::numBlocks> order)
     if (sorted != Chain::defaultOrder())
         order = Chain::defaultOrder();
 
-    for (size_t i = 0; i < order.size(); ++i)
-        chainOrder[i].store (order[i]);
+    packedChainOrder.store (packOrder (order), std::memory_order_release);
 
     juce::StringArray parts;
     for (int b : order)
@@ -480,6 +593,54 @@ void SNSynthProcessor::setChainOrder (std::array<int, Chain::numBlocks> order)
     const auto f = getSlotOrder();
     parameters.state.setProperty (StateIDs::slotOrder,
                                   juce::String (f[0]) + "," + juce::String (f[1]) + "," + juce::String (f[2]), nullptr);
+}
+
+void SNSynthProcessor::markStateChanged()
+{
+    ++uiStateEpoch;
+    updateHostDisplay (ChangeDetails().withNonParameterStateChanged (true));
+}
+
+double SNSynthProcessor::getTailLengthSeconds() const
+{
+    const float release = ampReleaseParam != nullptr ? ampReleaseParam->load() : 0.2f;
+    return std::isfinite (release) ? (double) release * 1.5 + 0.1 : 1.0; // release curve plus a little
+}
+
+void SNSynthProcessor::silenceAllVoices()
+{
+    for (int i = 0; i < synth.getNumVoices(); ++i)
+        if (auto* v = dynamic_cast<SynthVoice*> (synth.getVoice (i)))
+            v->hardReset();
+    keyboardState.reset();
+    for (auto& f : drumFilters) f.reset();
+    drumEq.reset();
+    drumDcX1 = drumDcY1 = 0.0f;
+    drumsResting = true;
+    drumQuietRun = 0;
+    limiter.reset();
+}
+
+void SNSynthProcessor::reset()
+{
+    silenceAllVoices();
+}
+
+void SNSynthProcessor::processBlockBypassed (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
+{
+    // Bypassed: silent, but keys let go while bypassed still let go, so no
+    // note is stuck on when the synth comes back.
+    buffer.clear();
+    for (const auto meta : midi)
+    {
+        const auto msg = meta.getMessage();
+        if (msg.isNoteOff())
+            synth.noteOff (msg.getChannel(), msg.getNoteNumber(), 0.0f, true);
+        else if (msg.isAllNotesOff() || msg.isAllSoundOff())
+            synth.allNotesOff (msg.getChannel(), true);
+        else if (msg.isSustainPedalOff())
+            synth.handleSustainPedal (msg.getChannel(), false);
+    }
 }
 
 void SNSynthProcessor::moveBlock (int position, int newPosition)
@@ -494,6 +655,7 @@ void SNSynthProcessor::moveBlock (int position, int newPosition)
     v.insert (v.begin() + newPosition, block);
     std::copy (v.begin(), v.end(), order.begin());
     setChainOrder (order);
+    markStateChanged();
 }
 
 std::array<int, 3> SNSynthProcessor::getSlotOrder() const
@@ -525,6 +687,7 @@ void SNSynthProcessor::moveSlot (int position, int delta)
     auto f = getSlotOrder();
     std::swap (f[(size_t) position], f[(size_t) other]);
     setSlotOrder (f);
+    markStateChanged();
 }
 
 void SNSynthProcessor::applySlotOrderFromState()
@@ -592,10 +755,11 @@ void SNSynthProcessor::renderLfo (int numSamples)
     for (int r = 0; r < m.numRoutes; ++r)
         anyLfoRoutes = anyLfoRoutes || m.routes[(size_t) r].target >= Mod::lfo1Rate;
 
-    float rate[2] {}, coef[2] {};
+    auto& rate = lfoRateNow;
+    auto& coef = lfoCoefNow;
     for (int i = 0; i < numSamples; ++i)
     {
-        if (i % 16 == 0)
+        if (m.onGrid (i) || lfoNeedsUpdate)
         {
             float offset[Mod::numTargets - Mod::lfo1Rate] {};
             if (anyLfoRoutes)
@@ -605,7 +769,7 @@ void SNSynthProcessor::renderLfo (int numSamples)
                     src[s] = m.newestSources[(size_t) s];
                 src[Mod::lfo1] = lfoSmoothed[0];
                 src[Mod::lfo2] = lfoSmoothed[1];
-                src[Mod::modWheel] = m.modWheel;
+                src[Mod::modWheel] = m.modWheelAt (i);
                 for (int r = 0; r < m.numRoutes; ++r)
                 {
                     const auto& route = m.routes[(size_t) r];
@@ -613,7 +777,7 @@ void SNSynthProcessor::renderLfo (int numSamples)
                         offset[route.target - Mod::lfo1Rate] += src[route.source] * route.amount;
                 }
             }
-            for (int l = 0; l < 2; ++l)
+            for (size_t l = 0; l < 2; ++l)
             {
                 const float ro = offset[rateT[l] - Mod::lfo1Rate], so = offset[smoothT[l] - Mod::lfo1Rate];
                 rate[l] = std::abs (ro) > 1.0e-7f ? Mod::applyOffset (m, rateT[l], ro) : m.baseReal[(size_t) rateT[l]];
@@ -625,27 +789,28 @@ void SNSynthProcessor::renderLfo (int numSamples)
                 const float smoothSeconds = smoothPct * 0.01f * 0.25f / rate[l];
                 coef[l] = smoothSeconds > 1.0e-5f ? 1.0f - std::exp (-1.0f / (smoothSeconds * (float) currentSampleRate)) : 1.0f;
             }
+            lfoNeedsUpdate = false;
         }
 
-        for (int l = 0; l < 2; ++l)
+        for (size_t l = 0; l < 2; ++l)
         {
-            auto& phase = lfoPhases[(size_t) l];
-            const float raw = lfoShapeValue (shapes[l], phase, lfoRandom[(size_t) l]);
-            lfoSmoothed[(size_t) l] += (raw - lfoSmoothed[(size_t) l]) * coef[l];
-            lfoBuffers[(size_t) l][(size_t) i] = lfoSmoothed[(size_t) l];
+            auto& phase = lfoPhases[l];
+            const float raw = lfoShapeValue (shapes[l], phase, lfoRandom[l]);
+            lfoSmoothed[l] += (raw - lfoSmoothed[l]) * coef[l];
+            lfoBuffers[l][(size_t) i] = lfoSmoothed[l];
             phase += rate[l] / currentSampleRate;
             if (phase >= 1.0)
             {
                 phase -= std::floor (phase);
-                lfoRandom[(size_t) l] = lfoRng.nextFloat() * 2.0f - 1.0f;
+                lfoRandom[l] = lfoRng.nextFloat() * 2.0f - 1.0f;
             }
         }
     }
 
-    for (int l = 0; l < 2; ++l)
+    for (size_t l = 0; l < 2; ++l)
     {
-        voiceSettings.lfo[l] = lfoBuffers[(size_t) l].data();
-        modContext.lfo[l] = lfoBuffers[(size_t) l].data();
+        voiceSettings.lfo[l] = lfoBuffers[l].data();
+        modContext.lfo[l] = lfoBuffers[l].data();
     }
 }
 
@@ -658,6 +823,7 @@ void SNSynthProcessor::getStateInformation (juce::MemoryBlock& destData)
 {
     parameters.state.setProperty (StateIDs::drumPattern, drumPattern.toString(), nullptr);
     auto state = parameters.copyState();
+    state.setProperty (StateIDs::formatVersion, StateIDs::currentFormatVersion, nullptr);
     state.removeChild (state.getChildWithName ("MODULATION"), nullptr);
     state.appendChild (modMatrix.toValueTree(), nullptr);
     if (auto xml = state.createXml())
@@ -666,9 +832,21 @@ void SNSynthProcessor::getStateInformation (juce::MemoryBlock& destData)
 
 void SNSynthProcessor::setStateInformation (const void* data, int sizeInBytes)
 {
+    ++uiStateEpoch; // the screen redraws everything after a load
     if (auto xml = getXmlFromBinary (data, sizeInBytes))
         if (xml->hasTagName (parameters.state.getType()))
         {
+            // 1 = saved before format versions existed. A newer number than
+            // this build knows still loads everything it recognises.
+            loadedFormatVersion = xml->getIntAttribute (StateIDs::formatVersion, 1);
+
+            // A damaged preset can hold "nan" or "inf" for a control: load
+            // that control at its default instead.
+            for (auto* child : xml->getChildWithTagNameIterator ("PARAM"))
+                if (child->hasAttribute ("value") && ! std::isfinite (child->getDoubleAttribute ("value")))
+                    if (auto* param = dynamic_cast<juce::RangedAudioParameter*> (parameters.getParameter (child->getStringAttribute ("id"))))
+                        child->setAttribute ("value", param->convertFrom0to1 (param->getDefaultValue()));
+
             parameters.replaceState (juce::ValueTree::fromXml (*xml));
             applySlotOrderFromState();
             if (parameters.state.hasProperty (StateIDs::drumPattern))
