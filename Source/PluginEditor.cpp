@@ -147,7 +147,7 @@ SNSynthEditor::SNSynthEditor (SNSynthProcessor& p)
 
     limiterButton.setTooltip ("Output Limiter: keeps the output just under 0 dB by turning loud peaks down smoothly. "
                               "Even when off, a safety ceiling stops anything above -0.3 dB (it clips instead).");
-    voiceCompButton.setTooltip ("Voice Gain Compensation: turns the sum down as more notes play, so chords don't jump in level");
+    voiceCompButton.setTooltip ("Voice Gain Compensation: fixed headroom for chords, set by the Voices knob (up to -6 dB). Held notes never duck when you add notes.");
     for (auto* b : { &limiterButton, &voiceCompButton })
     {
         b->setWantsKeyboardFocus (false);

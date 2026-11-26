@@ -211,6 +211,8 @@ public:
 
         if (! ampEnv.isActive())
         {
+            noteGainS = noteGain; // a fresh note starts at its own level
+            dcX1 = dcY1 = 0.0f;
             osc1.reset (shared.osc[0]);
             osc2.reset (shared.osc[1]);
             subPhase = 0.0;
@@ -279,6 +281,8 @@ public:
 
         const double sr = getSampleRate();
         const int numChannels = output.getNumChannels();
+        const float gainGlideCoef = 1.0f - (float) std::exp (-1.0 / (0.002 * sr));
+        const float dcCoef = (float) std::exp (-2.0 * juce::MathConstants<double>::pi * 5.0 / sr);
         float baseOct[3] { sOct[0], sOct[1], sOct[2] };
 
         for (int i = 0; i < numSamples; ++i)
@@ -376,7 +380,10 @@ public:
             const float lfo = cur.lfo[0] != nullptr ? cur.lfo[0][pos] : 0.0f;
             const float lfoOct = lfo * cur.lfoToCutoff * lfoOctavesAtFull; // older projects' "LFO to Cutoff"
 
-            const float gain = ampEnv.next() * noteGain;
+            // Velocity level glides over about 2 ms, so a stolen or retriggered
+            // voice that is still sounding doesn't jump to the new level (click).
+            noteGainS += (noteGain - noteGainS) * gainGlideCoef;
+            const float gain = ampEnv.next() * noteGainS;
             if (cur.taps[0] != nullptr) cur.taps[0][pos] += osc;
 
             // The chain: Filters 1-3, Amp and EQ in the chosen order.
@@ -416,7 +423,12 @@ public:
                 recoverFromBadValue();
                 x = 0.0f;
             }
-            const float sample = x;
+            // DC blocker (5 Hz high-pass): drive, resonance and ring mod can
+            // push the wave off-centre, which wastes headroom and thumps.
+            const float blocked = x - dcX1 + dcCoef * dcY1;
+            dcX1 = x;
+            dcY1 = blocked;
+            const float sample = blocked;
 
             for (int ch = 0; ch < numChannels; ++ch)
                 output.addSample (ch, pos, sample);
@@ -445,6 +457,7 @@ private:
         sFm12 = shared.fm1to2; sFm21 = shared.fm2to1; sRing = shared.ringMod;
         sLvl1 = shared.osc[0].level; sLvl2 = shared.osc[1].level;
         driftValue = 0.0f;
+        dcX1 = dcY1 = 0.0f;
         snapSmoothing = true; // the next 16-sample update puts the rest back to the knob values
     }
 
@@ -566,7 +579,8 @@ private:
     double bendSemitones = 0.0;
     Oscillator osc1, osc2;
     double subPhase = 0.0;
-    float  noteGain = 1.0f;
+    float  noteGain = 1.0f, noteGainS = 1.0f;
+    float  dcX1 = 0.0f, dcY1 = 0.0f; // DC blocker state
     int    noteSerial = 0;
     float  lastFreq = 0.0f;
     float  lastCutoffHz[3] = { 1000.0f, 1000.0f, 1000.0f };

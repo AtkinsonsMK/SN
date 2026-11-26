@@ -73,7 +73,21 @@ private:
 
     struct SlotParams { std::atomic<float> *type, *cutoff, *res, *drive, *env, *character, *levelMatch; };
     std::array<SlotParams, 3> slotParams {};
-    std::array<std::atomic<int>, Chain::numBlocks> chainOrder { 0, 1, 2, 3, 4 };
+    // The whole chain order packed into one value (3 bits per position), so
+    // the sound can never read it half-changed while the screen rearranges it.
+    std::atomic<uint32_t> packedChainOrder { packOrder (Chain::defaultOrder()) };
+    static uint32_t packOrder (const std::array<int, Chain::numBlocks>& o)
+    {
+        uint32_t v = 0;
+        for (size_t i = 0; i < o.size(); ++i) v |= (uint32_t) (o[i] & 7) << (3 * i);
+        return v;
+    }
+    static std::array<int, Chain::numBlocks> unpackOrder (uint32_t v)
+    {
+        std::array<int, Chain::numBlocks> o {};
+        for (size_t i = 0; i < o.size(); ++i) o[i] = (int) ((v >> (3 * i)) & 7);
+        return o;
+    }
 
 
     VoiceSettings voiceSettings;
@@ -108,6 +122,7 @@ private:
     std::array<float, 3> drumEqDb {};
     std::array<std::vector<float>, Drums::numRoutes> drumBus; // dry, into Filter 1, 2, 3
     std::vector<float> drumOut;
+    float drumDcX1 = 0.0f, drumDcY1 = 0.0f, drumDcCoef = 0.9993f;
     std::atomic<uint32_t> auditionMask { 0 };
     static constexpr float drumGain = 0.4f;
     std::unique_ptr<OutputFollower> outputFollower; // standalone app: follow the Mac's system output

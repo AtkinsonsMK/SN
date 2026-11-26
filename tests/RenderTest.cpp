@@ -8,6 +8,8 @@
 #include "PluginEditor.h"
 #include <cmath>
 #include <iostream>
+#include <thread>
+#include <functional>
 
 // Counts memory allocations while switched on, to prove the audio thread never allocates.
 static std::atomic<long> allocCount { 0 };
@@ -132,10 +134,191 @@ static int saveSnapshot (const juce::File& file)
     return 0;
 }
 
+// ---- Sound-quality checks (targets from the 26 Nov sound review) ----------
+namespace SoundChecks
+{
+    struct Event { int sample; juce::MidiMessage msg; };
+
+    // Renders mono (left) with MIDI events at exact sample positions.
+    static std::vector<float> renderEvents (SNSynthProcessor& p, std::vector<Event> events, int numSamples, int blockSize = 512)
+    {
+        std::vector<float> out ((size_t) numSamples);
+        juce::AudioBuffer<float> block (2, blockSize);
+        for (int pos = 0; pos < numSamples; pos += blockSize)
+        {
+            const int len = juce::jmin (blockSize, numSamples - pos);
+            juce::MidiBuffer midi;
+            for (auto& e : events)
+                if (e.sample >= pos && e.sample < pos + len)
+                    midi.addEvent (e.msg, e.sample - pos);
+            juce::AudioBuffer<float> view (block.getArrayOfWritePointers(), 2, len);
+            p.processBlock (view, midi);
+            std::copy (block.getReadPointer (0), block.getReadPointer (0) + len, out.begin() + pos);
+        }
+        return out;
+    }
+
+    static std::unique_ptr<SNSynthProcessor> neutral (double sr)
+    {
+        auto p = makeSynth (sr);
+        setParam (*p, ParamIDs::drift, 0);
+        setParam (*p, ParamIDs::limiter, 0);
+        setParam (*p, ParamIDs::volume, -12);
+        return p;
+    }
+
+    static double rms (const std::vector<float>& x, size_t a, size_t b)
+    {
+        double s = 0.0;
+        for (size_t i = a; i < b; ++i) s += (double) x[i] * x[i];
+        return std::sqrt (s / (double) (b - a));
+    }
+
+    static void run (double sr)
+    {
+        using juce::MidiMessage;
+        const int sec = (int) sr;
+
+        // 1. A held note keeps its level while other notes come and go (target: within 0.2 dB).
+        for (bool comp : { false, true })
+        {
+            std::vector<Event> held { { 0, MidiMessage::noteOn (1, 45, (juce::uint8) 100) } };
+            std::vector<Event> others;
+            for (int k = 0; k < 10; ++k)
+            {
+                const int at = sec / 2 + k * (sec / 5);
+                others.push_back ({ at, MidiMessage::noteOn (1, 60 + (k % 5) * 2, (juce::uint8) 100) });
+                others.push_back ({ at + sec / 20, MidiMessage::noteOff (1, 60 + (k % 5) * 2) });
+            }
+            auto all = held; all.insert (all.end(), others.begin(), others.end());
+            auto setup = [&] { auto q = neutral (sr); setParam (*q, ParamIDs::voiceGainComp, comp ? 1.0f : 0.0f);
+                               setParam (*q, ParamIDs::aenvRelease, 0.3f); return q; };
+            auto a = renderEvents (*setup(), held, sec * 3);
+            auto b = renderEvents (*setup(), all, sec * 3);
+            auto c = renderEvents (*setup(), others, sec * 3);
+            // The held note inside the mix = mix minus the other notes alone.
+            double worst = 0.0;
+            for (int w = sec / 2; w + sec / 10 <= sec * 3; w += sec / 10)
+            {
+                std::vector<float> d ((size_t) (sec / 10));
+                for (size_t i = 0; i < d.size(); ++i) d[i] = b[(size_t) w + i] - c[(size_t) w + i];
+                const double lvl = 20.0 * std::log10 (rms (d, 0, d.size()) / rms (a, (size_t) w, (size_t) (w + sec / 10)));
+                worst = juce::jmax (worst, std::abs (lvl));
+            }
+            check (worst <= 0.2, juce::String ("Sound 1: held note level stays put as notes come and go, Voice Gain Comp ")
+                                     + (comp ? "on" : "off") + " (worst " + juce::String (worst, 3) + " dB, target 0.2)");
+        }
+
+        // 3. DC offset on the worst cases from the review (target: -80 dBFS or lower).
+        {
+            struct Case { const char* name; std::function<void (SNSynthProcessor&)> set; };
+            const Case cases[] = {
+                { "OTA 24 drive 100", [] (SNSynthProcessor& q) { setParam (q, ParamIDs::slot (0, ParamIDs::slotDrive), 100); } },
+                { "Sallen-Key drive 100 res 80", [] (SNSynthProcessor& q) {
+                      setParam (q, ParamIDs::slot (0, ParamIDs::slotType), FilterType::sallenKey);
+                      setParam (q, ParamIDs::slot (0, ParamIDs::slotDrive), 100); setParam (q, ParamIDs::slot (0, ParamIDs::slotResonance), 80); } },
+                { "Steiner-Parker res 90 drive 50", [] (SNSynthProcessor& q) {
+                      setParam (q, ParamIDs::slot (0, ParamIDs::slotType), FilterType::steinerParker);
+                      setParam (q, ParamIDs::slot (0, ParamIDs::slotDrive), 50); setParam (q, ParamIDs::slot (0, ParamIDs::slotResonance), 90); } },
+                { "ring mod pulse x pulse", [] (SNSynthProcessor& q) {
+                      setParam (q, ParamIDs::slot (0, ParamIDs::slotType), FilterType::off);
+                      setParam (q, ParamIDs::sawLevel, 0); setParam (q, ParamIDs::pulseLevel, 100); setParam (q, ParamIDs::osc2Saw, 0);
+                      setParam (q, ParamIDs::osc2Pulse, 100); setParam (q, ParamIDs::osc2Fine, 0); setParam (q, ParamIDs::ringMod, 100);
+                      setParam (q, ParamIDs::osc1Level, 0); setParam (q, ParamIDs::osc2Level, 0); } },
+            };
+            for (auto& cs : cases)
+            {
+                auto q = neutral (sr);
+                setParam (*q, ParamIDs::volume, 0);
+                cs.set (*q);
+                auto x = renderEvents (*q, { { 0, MidiMessage::noteOn (1, 48, (juce::uint8) 127) } }, (int) (sr * 2.5));
+                // Window-weighted mean (Blackman-Harris), so a part-cycle at
+                // the window edges doesn't read as DC.
+                double mean = 0.0, wsum = 0.0;
+                const size_t n = x.size() - (size_t) sec;
+                for (size_t i = 0; i < n; ++i)
+                {
+                    const double ph = 2.0 * juce::MathConstants<double>::pi * (double) i / (double) n;
+                    const double w = 0.35875 - 0.48829 * std::cos (ph) + 0.14128 * std::cos (2 * ph) - 0.01168 * std::cos (3 * ph);
+                    mean += w * x[(size_t) sec + i]; wsum += w;
+                }
+                mean /= wsum;
+                const double dcDb = 20.0 * std::log10 (juce::jmax (1.0e-12, std::abs (mean)));
+                check (dcDb <= -80.0, juce::String ("Sound 3: no DC offset, ") + cs.name + " (" + juce::String (dcDb, 1) + " dBFS, target -80)");
+            }
+        }
+
+        // 4. Drive changes tone, not volume (target: within 1.5 dB across 0-100%).
+        for (int type : { (int) FilterType::ota, (int) FilterType::sallenKey, (int) FilterType::lowpassGate, (int) FilterType::steinerParker,
+                          (int) FilterType::polivoks, (int) FilterType::comb, (int) FilterType::formant })
+        {
+            juce::String curve;
+            double ref = 0.0, worst = 0.0;
+            for (int d = 0; d <= 100; d += 10)
+            {
+                auto q = neutral (sr);
+                setParam (*q, ParamIDs::slot (0, ParamIDs::slotType), (float) type);
+                setParam (*q, ParamIDs::slot (0, ParamIDs::slotCutoff), 2000.0f);
+                setParam (*q, ParamIDs::slot (0, ParamIDs::slotDrive), (float) d);
+                if (type == FilterType::lowpassGate) setParam (*q, ParamIDs::slot (0, ParamIDs::slotCharacter), 100);
+                auto x = renderEvents (*q, { { 0, MidiMessage::noteOn (1, 48, (juce::uint8) 127) } }, sec);
+                const double lvl = 20.0 * std::log10 (rms (x, (size_t) sec / 2, x.size()));
+                if (d == 0) ref = lvl;
+                worst = juce::jmax (worst, std::abs (lvl - ref));
+                curve << juce::String (lvl - ref, 1) << " ";
+            }
+            check (worst <= 1.5, "Sound 4: Drive keeps the level, " + Params::filterTypeNames()[type] + " (worst " + juce::String (worst, 2)
+                                     + " dB, target 1.5; 0-100%: " + curve.trim() + ")");
+        }
+
+        // 6. Voice steal with very different velocities doesn't click (target: 1.2x a normal step).
+        {
+            auto q = neutral (sr);
+            setParam (*q, ParamIDs::sawLevel, 0); setParam (*q, ParamIDs::sineLevel, 100);
+            setParam (*q, ParamIDs::slot (0, ParamIDs::slotType), FilterType::off);
+            setParam (*q, ParamIDs::voices, 2); setParam (*q, ParamIDs::velocityAmount, 50);
+            setParam (*q, ParamIDs::aenvAttack, 0.0005f); setParam (*q, ParamIDs::aenvRelease, 0.001f);
+            setParam (*q, ParamIDs::volume, 0);
+            const int t3 = sec;
+            auto x = renderEvents (*q, { { 0, MidiMessage::noteOn (1, 69, (juce::uint8) 127) },
+                                         { sec / 2, MidiMessage::noteOn (1, 72, (juce::uint8) 20) },
+                                         { t3, MidiMessage::noteOn (1, 76, (juce::uint8) 127) } }, sec * 2);
+            double steady = 0.0, atSteal = 0.0;
+            for (size_t i = (size_t) (sec * 3 / 2); i < (size_t) (sec * 2) - 1; ++i) steady = juce::jmax (steady, (double) std::abs (x[i + 1] - x[i]));
+            for (size_t i = (size_t) t3; i < (size_t) t3 + 300; ++i) atSteal = juce::jmax (atSteal, (double) std::abs (x[i + 1] - x[i]));
+            const double ratio = atSteal / steady;
+            check (ratio <= 1.2, "Sound 6: stealing a voice doesn't click (step " + juce::String (ratio, 2) + "x normal, target 1.2x)");
+        }
+
+        // 7. Rearranging the chain while the sound reads it never gives a half-changed order (target: 0 in 10 million reads).
+        {
+            auto q = makeSynth (sr);
+            std::atomic<bool> stop { false };
+            std::thread ui ([&] { int k = 0; while (! stop) { q->moveBlock (k % 5, (k * 3 + 1) % 5); ++k; } });
+            long bad = 0;
+            for (int i = 0; i < 10000000; ++i)
+            {
+                auto o = q->getChainOrder();
+                std::sort (o.begin(), o.end());
+                if (o != Chain::defaultOrder()) ++bad;
+            }
+            stop = true; ui.join();
+            check (bad == 0, "Sound 7: chain order is never read half-changed (" + juce::String ((juce::int64) bad) + " bad reads in 10 million)");
+        }
+    }
+}
+
 int main (int argc, char** argv)
 {
     juce::ScopedJuceInitialiser_GUI juceInit;
     const double sr = 48000.0;
+
+    if (argc > 1 && juce::String (argv[1]) == "--sound")
+    {
+        SoundChecks::run (sr);
+        std::cout << (failures == 0 ? "All checks passed" : juce::String (failures) + " check(s) failed") << std::endl;
+        return failures == 0 ? 0 : 1;
+    }
 
     // A short audio demo of the drum machine: 2 bars straight, 2 bars with swing.
     if (argc > 2 && juce::String (argv[1]) == "--drumdemo")
@@ -1343,6 +1526,8 @@ int main (int argc, char** argv)
         const double ampDb = 10.0 * std::log10 (after / juce::jmax (1.0e-12, before));
         check (std::abs (ampDb + 6.0) < 1.5, "Numbers view: the Amp column shows the Amp's change (" + juce::String (ampDb, 1) + " dB at 50% sustain)");
     }
+
+    SoundChecks::run (sr);
 
     std::cout << (failures == 0 ? "All checks passed" : juce::String (failures) + " check(s) failed") << std::endl;
     return failures == 0 ? 0 : 1;

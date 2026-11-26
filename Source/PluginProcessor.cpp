@@ -55,6 +55,8 @@ void SNSynthProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     for (auto& b : lfoBuffers)
         b.assign ((size_t) juce::jmax (samplesPerBlock, 512), 0.0f);
     limiterRelease = std::exp (-1.0f / (0.15f * (float) sampleRate));
+    drumDcCoef = (float) std::exp (-2.0 * juce::MathConstants<double>::pi * 5.0 / sampleRate);
+    drumDcX1 = drumDcY1 = 0.0f;
     limiterEnv = 0.0f;
     voiceComp.reset (sampleRate, 0.05);
     voiceComp.setCurrentAndTargetValue (1.0f);
@@ -133,12 +135,14 @@ void SNSynthProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
     const int numSamples  = buffer.getNumSamples();
     const int numChannels = buffer.getNumChannels();
 
-    // Voice Gain Compensation: turns the sum down as more notes play
-    // (1 / square root of the number of notes), so chords don't jump in level.
+    // Voice Gain Compensation: fixed headroom for chords, set by the Voices
+    // knob (1 voice 0 dB, 2 voices -3 dB, 3 voices -4.8 dB, 4 or more -6 dB).
+    // It no longer follows how many notes are sounding, so a held note never
+    // ducks or swells as other notes come and go.
     {
         const bool comp = p (ParamIDs::voiceGainComp)->load() > 0.5f;
-        const int playing = synth.countActiveVoices();
-        voiceComp.setTargetValue (comp ? 1.0f / std::sqrt ((float) juce::jmax (1, playing)) : 1.0f);
+        const float voices = juce::jlimit (1.0f, 4.0f, p (ParamIDs::voices)->load());
+        voiceComp.setTargetValue (comp ? 1.0f / std::sqrt (voices) : 1.0f);
     }
 
     // Volume and the limiter run in short chunks so Volume can follow its modulation.
@@ -297,8 +301,9 @@ void SNSynthProcessor::updateVoiceSettings()
         slot.oversample = os;
     }
 
+    const auto order = unpackOrder (packedChainOrder.load (std::memory_order_acquire));
     for (size_t i = 0; i < (size_t) Chain::numBlocks; ++i)
-        v.order[i] = chainOrder[i].load();
+        v.order[i] = order[i];
 
     synth.setVoiceLimit ((int) p (ParamIDs::voices)->load());
 }
@@ -460,8 +465,14 @@ void SNSynthProcessor::renderDrums (int numSamples)
             for (auto& f : drumFilters) f.reset();
             drumEq.reset();
             drumSmooth = {};
+            drumDcX1 = drumDcY1 = 0.0f;
             x = 0.0f;
         }
+        // DC blocker (5 Hz) on the filtered drums, as on the voices.
+        const float blocked = x - drumDcX1 + drumDcCoef * drumDcY1;
+        drumDcX1 = x;
+        drumDcY1 = blocked;
+        x = blocked;
         drumOut[(size_t) i] = x + drumBus[0][(size_t) i];
     }
 }
@@ -489,10 +500,7 @@ float SNSynthProcessor::globalVolumeDb (int pos)
 
 std::array<int, Chain::numBlocks> SNSynthProcessor::getChainOrder() const
 {
-    std::array<int, Chain::numBlocks> o {};
-    for (size_t i = 0; i < o.size(); ++i)
-        o[i] = chainOrder[i].load();
-    return o;
+    return unpackOrder (packedChainOrder.load (std::memory_order_acquire));
 }
 
 void SNSynthProcessor::setChainOrder (std::array<int, Chain::numBlocks> order)
@@ -503,8 +511,7 @@ void SNSynthProcessor::setChainOrder (std::array<int, Chain::numBlocks> order)
     if (sorted != Chain::defaultOrder())
         order = Chain::defaultOrder();
 
-    for (size_t i = 0; i < order.size(); ++i)
-        chainOrder[i].store (order[i]);
+    packedChainOrder.store (packOrder (order), std::memory_order_release);
 
     juce::StringArray parts;
     for (int b : order)
