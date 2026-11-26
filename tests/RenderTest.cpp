@@ -271,6 +271,136 @@ namespace SoundChecks
                                      + " dB, target 1.5; 0-100%: " + curve.trim() + ")");
         }
 
+        // 2. FM and ring mod don't alias (target: -60 dB). Osc 2 in unison, so every real
+        //    tone is a harmonic of the note; anything between harmonics is aliasing.
+        //    65536-point 7-term Blackman-Harris FFT, as in the review's rig.
+        {
+            auto aliasDb = [&] (const std::vector<float>& x, double f0, double& totalDb)
+            {
+                constexpr int order = 16, W = 1 << order;
+                juce::dsp::FFT fft (order);
+                const double a[7] = { 0.27105140069342, 0.43329793923448, 0.21812299954311, 0.06592544638803,
+                                      0.01081174209837, 0.00077658482522, 0.00001388721735 };
+                std::vector<float> buf (2 * W, 0.0f);
+                const int st = (int) x.size() - W;
+                for (int i = 0; i < W; ++i)
+                {
+                    double w = 0.0;
+                    for (int k = 0; k < 7; ++k) w += ((k % 2) ? -1.0 : 1.0) * a[k] * std::cos (2.0 * juce::MathConstants<double>::pi * k * i / W);
+                    buf[(size_t) i] = (float) (x[(size_t) (st + i)] * w);
+                }
+                fft.performFrequencyOnlyForwardTransform (buf.data());
+                std::vector<bool> harm ((size_t) W / 2, false);
+                for (int k = 1; k * f0 < sr / 2; ++k)
+                {
+                    const int c = (int) std::round (k * f0 * W / sr);
+                    for (int j = juce::jmax (0, c - 9); j <= juce::jmin (W / 2 - 1, c + 9); ++j) harm[(size_t) j] = true;
+                }
+                const int c0 = (int) std::round (f0 * W / sr);
+                double fund = 0.0, fundSum = 0.0, strongest = 0.0, total = 0.0;
+                for (int j = c0 - 9; j <= c0 + 9; ++j) { const double pw = (double) buf[(size_t) j] * buf[(size_t) j]; fund = juce::jmax (fund, pw); fundSum += pw; }
+                for (int j = 0; j < W / 2; ++j)
+                {
+                    const double f = j * sr / W;
+                    if (f < 20.0 || f > 20000.0 || harm[(size_t) j]) continue;
+                    const double pw = (double) buf[(size_t) j] * buf[(size_t) j];
+                    strongest = juce::jmax (strongest, pw); total += pw;
+                }
+                totalDb = 10.0 * std::log10 (total / fundSum + 1.0e-30);
+                return 10.0 * std::log10 (strongest / fund + 1.0e-30);
+            };
+            struct Case { const char* name; int note; std::function<void (SNSynthProcessor&)> set; };
+            const Case cases[] = {
+                { "FM 2>1 50%, sine into saw, A5", 81, [] (SNSynthProcessor& q) { setParam (q, ParamIDs::osc2Sine, 100); setParam (q, ParamIDs::osc2Saw, 0);
+                                                                                setParam (q, ParamIDs::fm2to1, 50); } },
+                { "FM 2>1 50%, saw into saw, A5", 81, [] (SNSynthProcessor& q) { setParam (q, ParamIDs::osc2Saw, 100); setParam (q, ParamIDs::fm2to1, 50); } },
+                { "FM 1>2 100%, saw into saw, C7", 96, [] (SNSynthProcessor& q) { setParam (q, ParamIDs::osc2Saw, 100); setParam (q, ParamIDs::fm1to2, 100); } },
+                { "Ring mod saw x saw, C7", 96, [] (SNSynthProcessor& q) { setParam (q, ParamIDs::osc2Saw, 100); setParam (q, ParamIDs::ringMod, 100);
+                                                                         setParam (q, ParamIDs::osc1Level, 0); setParam (q, ParamIDs::osc2Level, 0); } },
+            };
+            for (auto& cs : cases)
+            {
+                auto q = neutral (sr);
+                setParam (*q, ParamIDs::slot (0, ParamIDs::slotType), FilterType::off);
+                setParam (*q, ParamIDs::osc2Fine, 0); setParam (*q, ParamIDs::osc2Coarse, 0);
+                setParam (*q, ParamIDs::osc2Level, 100);
+                cs.set (*q);
+                auto x = renderEvents (*q, { { 0, MidiMessage::noteOn (1, cs.note, (juce::uint8) 127) } }, (int) (sr * 2.0));
+                double total = 0.0;
+                const double strongest = aliasDb (x, 440.0 * std::pow (2.0, (cs.note - 69) / 12.0), total);
+                check (strongest <= -60.0, juce::String ("Sound 2: ") + cs.name + " alias strongest " + juce::String (strongest, 1)
+                                               + " dB, total " + juce::String (total, 1) + " dB (target -60)");
+            }
+        }
+
+        // 5. DAW automation glides instead of stepping, at any buffer size.
+        //    Cutoff swept 200 Hz -> 5 kHz over 1 s, one update per block, on a 440 Hz sine through OTA 24 res 50.
+        {
+            auto sweep = [&] (int block)
+            {
+                auto q = neutral (sr);
+                setParam (*q, ParamIDs::sawLevel, 0); setParam (*q, ParamIDs::sineLevel, 100);
+                setParam (*q, ParamIDs::slot (0, ParamIDs::slotCutoff), 200);
+                setParam (*q, ParamIDs::slot (0, ParamIDs::slotResonance), 50);
+                const int total = (int) (sr * 1.5), start = (int) (sr * 0.25), len = sec;
+                std::vector<float> out ((size_t) total);
+                juce::AudioBuffer<float> buf (2, block);
+                for (int pos = 0; pos < total; pos += block)
+                {
+                    if (pos >= start && pos < start + len)
+                        setParam (*q, ParamIDs::slot (0, ParamIDs::slotCutoff), (float) (200.0 * std::pow (25.0, (double) (pos - start) / len)));
+                    juce::MidiBuffer midi;
+                    if (pos == 0) midi.addEvent (MidiMessage::noteOn (1, 69, (juce::uint8) 100), 0);
+                    const int n = juce::jmin (block, total - pos);
+                    juce::AudioBuffer<float> view (buf.getArrayOfWritePointers(), 2, n);
+                    q->processBlock (view, midi);
+                    std::copy (buf.getReadPointer (0), buf.getReadPointer (0) + n, out.begin() + pos);
+                }
+                if (auto* dir = std::getenv ("SN_DUMP"))
+                    juce::File (juce::String (dir) + "/sweep_b" + juce::String (block) + ".f32").replaceWithData (out.data(), out.size() * sizeof (float));
+                return out;
+            };
+            // Stepping shows up as sidebands 100-2000 Hz either side of the 440 Hz tone
+            // (same method as the review's rig: 4096-point 7-term Blackman-Harris windows).
+            auto sidebands = [&] (const std::vector<float>& x)
+            {
+                constexpr int order = 12, W = 1 << order;
+                juce::dsp::FFT fft (order);
+                const double a[7] = { 0.27105140069342, 0.43329793923448, 0.21812299954311, 0.06592544638803,
+                                      0.01081174209837, 0.00077658482522, 0.00001388721735 };
+                double worst = -400.0;
+                for (int st = (int) (0.3 * sr); st + W <= (int) (1.2 * sr); st += W / 2)
+                {
+                    std::vector<float> buf (2 * W, 0.0f);
+                    for (int i = 0; i < W; ++i)
+                    {
+                        double w = 0.0;
+                        for (int k = 0; k < 7; ++k) w += ((k % 2) ? -1.0 : 1.0) * a[k] * std::cos (2.0 * juce::MathConstants<double>::pi * k * i / W);
+                        buf[(size_t) i] = (float) (x[(size_t) (st + i)] * w);
+                    }
+                    fft.performFrequencyOnlyForwardTransform (buf.data());
+                    const int c0 = (int) std::round (440.0 * W / sr);
+                    double fund = 0.0, side = 0.0;
+                    for (int k = c0 - 9; k <= c0 + 9; ++k) fund += (double) buf[(size_t) k] * buf[(size_t) k];
+                    for (int k = 1; k < W / 2; ++k)
+                    {
+                        const double f = k * sr / W, df = std::abs (f - 440.0);
+                        bool sel = df > 100.0 && df < 2000.0;
+                        for (int h = 2; h < 6; ++h) sel = sel && std::abs (f - 440.0 * h) > 82.0;
+                        if (sel) side += (double) buf[(size_t) k] * buf[(size_t) k];
+                    }
+                    worst = juce::jmax (worst, 10.0 * std::log10 (side / fund + 1.0e-30));
+                }
+                return worst;
+            };
+            for (int block : { 32, 512, 2048 })
+            {
+                const double sb = sidebands (sweep (block));
+                check (sb <= -80.0, "Sound 5: cutoff automation at buffer " + juce::String (block) + " doesn't step (sidebands "
+                                        + juce::String (sb, 1) + " dB, target -80)");
+            }
+        }
+
         // 6. Voice steal with very different velocities doesn't click (target: 1.2x a normal step).
         {
             auto q = neutral (sr);

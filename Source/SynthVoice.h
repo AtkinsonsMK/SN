@@ -175,6 +175,12 @@ public:
             f.prepare ((float) newRate);
 
         smoothCoef = 1.0f - std::exp (-1.0f / (0.005f * (float) newRate)); // 5 ms
+        smoothCoef4x = 1.0f - std::exp (-1.0f / (0.005f * 4.0f * (float) newRate));
+        fmLpCoef = 1.0f - std::exp (-2.0f * juce::MathConstants<float>::pi * 16000.0f / (4.0f * (float) newRate));
+        // FM / ring mod oversampling: keep up to 20 kHz (or just under the top at low rates).
+        const double keep = std::min (20000.0, newRate * 0.4535);
+        oscDown1.design (keep / (2.0 * newRate));
+        oscDown2.design (keep / (4.0 * newRate));
         blockSmoothCoef = 1.0f - std::exp (-(float) modInterval / (0.005f * (float) newRate));
         driftCoef  = 1.0f - std::exp (-1.0f / (0.4f  * (float) newRate));  // 0.4 s
         driftValue = (float) (random.nextFloat() * 2.0 - 1.0);
@@ -212,6 +218,10 @@ public:
         if (! ampEnv.isActive())
         {
             noteGainS = noteGain; // a fresh note starts at its own level
+            oscOversample = false;
+            oscDown1.reset(); oscDown2.reset();
+            fmLp12[0] = fmLp12[1] = fmLp21[0] = fmLp21[1] = 0.0f;
+            bendS = bendSemitones;
             dcX1 = dcY1 = 0.0f;
             osc1.reset (shared.osc[0]);
             osc2.reset (shared.osc[1]);
@@ -282,6 +292,7 @@ public:
         const double sr = getSampleRate();
         const int numChannels = output.getNumChannels();
         const float gainGlideCoef = 1.0f - (float) std::exp (-1.0 / (0.002 * sr));
+        const double bendGlideCoef = 1.0 - std::exp (-1.0 / (0.003 * sr));
         const float dcCoef = (float) std::exp (-2.0 * juce::MathConstants<double>::pi * 5.0 / sr);
         float baseOct[3] { sOct[0], sOct[1], sOct[2] };
 
@@ -359,7 +370,9 @@ public:
             driftValue += (driftTarget - driftValue) * driftCoef;
             const double driftSemis = cur.drift * maxDriftCents * driftValue / 100.0;
 
-            const double pitch = currentNote + bendSemitones * cur.bendRange + driftSemis;
+            // Pitch bend glides over about 3 ms, so the wheel's steps can't be heard.
+            bendS += (bendSemitones - bendS) * bendGlideCoef;
+            const double pitch = currentNote + bendS * cur.bendRange + driftSemis;
             const double freq = 440.0 * std::pow (2.0, (pitch - 69.0) / 12.0);
             const double tune1 = std::exp2 (sTune1 / 12.0), tune2 = std::exp2 (sTune2 / 12.0);
             const double inc1 = juce::jmin (freq * tune1 / sr, 0.45);
@@ -367,13 +380,43 @@ public:
 
             // Each oscillator can push the other's phase (FM). Osc 2 -> 1
             // uses Osc 2's previous sample, which is how a feedback loop works.
-            const float o1 = osc1.next (inc1, sFm21 * fmDepthAtFull * osc2.getLastOut(), cur.osc[0], smoothCoef);
-            const float o2 = osc2.next (inc2, sFm12 * fmDepthAtFull * o1, cur.osc[1], smoothCoef);
+            // FM and ring mod create tones far above the top of hearing, which
+            // fold back down as harsh, out-of-tune grit. While either is in
+            // use, the two oscillators run at 4x the rate and are filtered
+            // back down, so those tones are removed instead of folding back.
+            if (! oscOversample && (sFm12 > 1.0e-4f || sFm21 > 1.0e-4f || sRing > 1.0e-4f
+                                    || cur.fm1to2 > 1.0e-4f || cur.fm2to1 > 1.0e-4f || cur.ringMod > 1.0e-4f))
+                oscOversample = true; // stays on until the note ends
+            float pair;
+            if (oscOversample)
+            {
+                float m[4];
+                for (int k = 0; k < 4; ++k)
+                {
+                    // The FM signals are softened above about 16 kHz first: a saw's
+                    // sudden jump would otherwise jerk the other oscillator's phase
+                    // and spray tones everywhere.
+                    fmLp21[0] += (osc2.getLastOut() - fmLp21[0]) * fmLpCoef; fmLp21[1] += (fmLp21[0] - fmLp21[1]) * fmLpCoef;
+                    const float a = osc1.next (inc1 * 0.25, sFm21 * fmDepthAtFull * fmLp21[1], cur.osc[0], smoothCoef4x);
+                    fmLp12[0] += (a - fmLp12[0]) * fmLpCoef; fmLp12[1] += (fmLp12[0] - fmLp12[1]) * fmLpCoef;
+                    const float b = osc2.next (inc2 * 0.25, sFm12 * fmDepthAtFull * fmLp12[1], cur.osc[1], smoothCoef4x);
+                    m[k] = sLvl1 * a + sLvl2 * b + sRing * a * b;
+                }
+                const float h0 = oscDown2.down (m[0], m[1]); // (in time order)
+                const float h1 = oscDown2.down (m[2], m[3]);
+                pair = oscDown1.down (h0, h1);
+            }
+            else
+            {
+                const float o1 = osc1.next (inc1, 0.0, cur.osc[0], smoothCoef);
+                const float o2 = osc2.next (inc2, 0.0, cur.osc[1], smoothCoef);
+                pair = sLvl1 * o1 + sLvl2 * o2;
+            }
             const float subOut = sSub > 1.0e-4f ? sub (inc1 * 0.5) : 0.0f;
             subPhase += inc1 * 0.5;
             if (subPhase >= 1.0) subPhase -= 1.0;
 
-            const float osc = 0.3f * (sLvl1 * o1 + sSub * subOut + sLvl2 * o2 + sRing * o1 * o2);
+            const float osc = 0.3f * (pair + sSub * subOut);
 
             // Filter rack: slots in series, in the chosen order.
             const float fenv = filterEnv.next();
@@ -458,6 +501,7 @@ private:
         sLvl1 = shared.osc[0].level; sLvl2 = shared.osc[1].level;
         driftValue = 0.0f;
         dcX1 = dcY1 = 0.0f;
+        oscDown1.reset(); oscDown2.reset();
         snapSmoothing = true; // the next 16-sample update puts the rest back to the knob values
     }
 
@@ -513,6 +557,11 @@ private:
         auto* m = shared.mod;
         if (m != nullptr)
         {
+            if (m->anyRamping) // DAW automation glides across the block
+                for (int t = 0; t < Mod::numTargets; ++t)
+                    if (m->ramping[(size_t) t])
+                        applyTarget (cur, t, m->baseRealAt (t, pos));
+
             float src[Mod::numSources];
             currentSources (pos, src);
 
@@ -534,7 +583,7 @@ private:
                 }
                 for (int t = 0; t < Mod::numTargets; ++t)
                     if (touched[t])
-                        applyTarget (cur, t, Mod::applyOffset (*m, t, offset[t]));
+                        applyTarget (cur, t, Mod::applyOffset (*m, t, offset[t], pos));
             }
         }
         applyEnvelopeSettings();
@@ -576,10 +625,14 @@ private:
     double currentNote   = 60.0;
     double glideStep     = 0.0;
     bool   gliding       = false;
-    double bendSemitones = 0.0;
+    double bendSemitones = 0.0, bendS = 0.0;
     Oscillator osc1, osc2;
     double subPhase = 0.0;
     float  noteGain = 1.0f, noteGainS = 1.0f;
+    bool   oscOversample = false;   // FM / ring mod: oscillators at 4x
+    Halfband oscDown1, oscDown2;
+    float  smoothCoef4x = 0.001f, fmLpCoef = 0.4f;
+    float  fmLp12[2] {}, fmLp21[2] {}; // FM signal softening (two gentle low-pass stages at 4x)
     float  dcX1 = 0.0f, dcY1 = 0.0f; // DC blocker state
     int    noteSerial = 0;
     float  lastFreq = 0.0f;

@@ -93,6 +93,7 @@ private:
     VoiceSettings voiceSettings;
     SynthEngine synth { voiceSettings };
     float meterMeanSquare = 0.0f;
+    bool rampFromLastBlock = false; // false until the first block after prepareToPlay
     Mod::Context modContext;
     std::array<std::atomic<float>*, Mod::numTargets> targetParams {};
     static constexpr int globalModInterval = 32;

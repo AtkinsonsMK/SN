@@ -65,6 +65,7 @@ void SNSynthProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     synthOutTap.assign ((size_t) juce::jmax (samplesPerBlock, 512), 0.0f);
     voiceSettings.live = &live;
     voiceSettings.lastNote = -1.0;
+    rampFromLastBlock = false;
     updateVoiceSettings();
     synth.setCurrentPlaybackSampleRate (sampleRate);
     keyboardState.reset();
@@ -108,6 +109,8 @@ void SNSynthProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
 
     const int n = buffer.getNumSamples();
     repairBadParameterValues();
+    modContext.invBlockLen = n > 0 ? 1.0f / (float) n : 0.0f;
+    rampFromLastBlock = true;
     updateVoiceSettings();
     renderLfo (n);
 
@@ -264,11 +267,17 @@ void SNSynthProcessor::updateVoiceSettings()
 
     // Every modulatable knob: plain value into the settings, and its
     // position for the modulation.
+    m.anyRamping = false;
     for (int t = 0; t < Mod::numTargets; ++t)
     {
         const float real = targetParams[(size_t) t]->load();
+        const float norm = m.ranges[(size_t) t].convertTo0to1 (real);
+        m.prevReal[(size_t) t] = rampFromLastBlock ? m.baseReal[(size_t) t] : real;
+        m.prevNorm[(size_t) t] = rampFromLastBlock ? m.baseNorm[(size_t) t] : norm;
+        m.ramping[(size_t) t] = m.prevReal[(size_t) t] != real;
+        m.anyRamping = m.anyRamping || m.ramping[(size_t) t];
         m.baseReal[(size_t) t] = real;
-        m.baseNorm[(size_t) t] = m.ranges[(size_t) t].convertTo0to1 (real);
+        m.baseNorm[(size_t) t] = norm;
         applyTarget (v, t, real);
     }
 
@@ -409,6 +418,10 @@ void SNSynthProcessor::renderDrums (int numSamples)
         if (i % SynthVoice::modInterval == 0)
         {
             drumCur = voiceSettings;
+            if (m.anyRamping) // automation glides across the block
+                for (int t = 0; t < Mod::numTargets; ++t)
+                    if (m.ramping[(size_t) t])
+                        applyTarget (drumCur, t, m.baseRealAt (t, i));
             if (anyDrumRoutes)
             {
                 float src[Mod::numSources] {};
@@ -429,7 +442,7 @@ void SNSynthProcessor::renderDrums (int numSamples)
                 }
                 for (int t = 0; t < Mod::numTargets; ++t)
                     if (touched[t])
-                        applyTarget (drumCur, t, Mod::applyOffset (m, t, offset[t]));
+                        applyTarget (drumCur, t, Mod::applyOffset (m, t, offset[t], i));
             }
             const float eqGlide = 1.0f - std::pow (1.0f - drumSmoothCoef, (float) SynthVoice::modInterval);
             drumEqDb[0] += (drumCur.eqLowDb  - drumEqDb[0]) * eqGlide;
@@ -495,7 +508,7 @@ float SNSynthProcessor::globalVolumeDb (int pos)
             if (m.routes[(size_t) r].target == Mod::volume)
                 offset += src[m.routes[(size_t) r].source] * m.routes[(size_t) r].amount;
     }
-    return std::abs (offset) > 1.0e-7f ? Mod::applyOffset (m, Mod::volume, offset) : m.baseReal[(size_t) Mod::volume];
+    return std::abs (offset) > 1.0e-7f ? Mod::applyOffset (m, Mod::volume, offset, pos) : m.baseRealAt (Mod::volume, pos);
 }
 
 std::array<int, Chain::numBlocks> SNSynthProcessor::getChainOrder() const

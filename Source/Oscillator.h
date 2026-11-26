@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cmath>
+#include <algorithm>
 
 // Settings for one oscillator, in working units.
 struct OscSettings
@@ -23,6 +24,7 @@ public:
     void reset (const OscSettings& s)
     {
         phase = 0.0;
+        prevP = 0.0;
         sSine = s.sine; sSaw = s.saw; sPulse = s.pulse; sPw = s.pulseWidth;
         lastOut = 0.0f;
     }
@@ -38,18 +40,40 @@ public:
         double p = phase + pm;
         p -= std::floor (p);
 
+        // How far the phase really moved this sample. With FM it isn't just
+        // inc: it can be faster, slower or even backwards, and the edge
+        // smoothing must use the real movement or it adds grit instead.
+        double dp = p - prevP;
+        dp -= std::floor (dp + 0.5);
+        prevP = p;
+        const bool backwards = dp < 0.0;
+        const double dt = std::clamp (std::abs (dp), 1.0e-9, 0.5);
+        // Moving backwards, the wave is the forward wave seen in a mirror
+        // (q = 1 - p), so the same smoothing applies with the signs swapped.
+        const double q = backwards ? 1.0 - p : p;
+
         float out = 0.0f;
         if (sSine > 1.0e-4f)
             out += sSine * (float) std::sin (2.0 * 3.14159265358979 * p);
         if (sSaw > 1.0e-4f)
-            out += sSaw * (float) (2.0 * p - 1.0 - polyBlep (p, inc));
+            out += sSaw * (float) (2.0 * p - 1.0 + (backwards ? polyBlep (q, dt) : -polyBlep (q, dt)));
         if (sPulse > 1.0e-4f)
         {
             double v = p < sPw ? 1.0 : -1.0;
-            v += polyBlep (p, inc);
-            double t = p - sPw;
-            if (t < 0.0) t += 1.0;
-            v -= polyBlep (t, inc);
+            if (! backwards)
+            {
+                v += polyBlep (p, dt);
+                double t = p - sPw;
+                if (t < 0.0) t += 1.0;
+                v -= polyBlep (t, dt);
+            }
+            else
+            {
+                double t = q - (1.0 - sPw);
+                if (t < 0.0) t += 1.0;
+                v += polyBlep (t, dt);
+                v -= polyBlep (q, dt);
+            }
             out += sPulse * (float) (v - (2.0 * sPw - 1.0)); // remove DC so level stays even
         }
 
@@ -74,7 +98,7 @@ public:
     }
 
 private:
-    double phase = 0.0;
+    double phase = 0.0, prevP = 0.0;
     float sSine = 0.0f, sSaw = 1.0f, sPulse = 0.0f, sPw = 0.5f;
     float lastOut = 0.0f;
 };

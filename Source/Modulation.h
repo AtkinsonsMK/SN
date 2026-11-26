@@ -167,6 +167,22 @@ namespace Mod
         std::array<float, numTargets> baseReal {};  // the value in its own units
         std::array<juce::NormalisableRange<float>, numTargets> ranges;
 
+        // DAW automation arrives once per block. Each knob that moved glides
+        // in a straight line from last block's value to this one across the
+        // block, so automation never steps at large buffer sizes.
+        std::array<float, numTargets> prevReal {}, prevNorm {};
+        std::array<bool, numTargets> ramping {};
+        bool anyRamping = false;
+        float invBlockLen = 0.0f;
+
+        float rampFrac (int pos) const { return juce::jlimit (0.0f, 1.0f, (float) (pos + 16) * invBlockLen); }
+        float baseRealAt (int t, int pos) const;
+        float baseNormAt (int t, int pos) const
+        {
+            if (pos < 0 || ! ramping[(size_t) t]) return baseNorm[(size_t) t];
+            return prevNorm[(size_t) t] + (baseNorm[(size_t) t] - prevNorm[(size_t) t]) * rampFrac (pos);
+        }
+
         float modWheel = 0.0f;              // 0..1
         const float* lfo[2] = { nullptr, nullptr };
 
@@ -175,14 +191,24 @@ namespace Mod
     };
 
     // The modulated value of target t, given the summed offset (-1..1 range units).
-    inline float applyOffset (const Context& c, int t, float offset)
+    inline float Context::baseRealAt (int t, int pos) const
+    {
+        if (pos < 0 || ! ramping[(size_t) t]) return baseReal[(size_t) t];
+        const float a = prevReal[(size_t) t], b = baseReal[(size_t) t], f = rampFrac (pos);
+        if (isOctaveScaled (t)) // glide in octaves, as the ear hears it
+            return std::exp2 (std::log2 (juce::jmax (1.0e-3f, a)) + (std::log2 (juce::jmax (1.0e-3f, b)) - std::log2 (juce::jmax (1.0e-3f, a))) * f);
+        return a + (b - a) * f;
+    }
+
+    // pos: sample position in the block (for the automation glide); -1 = end value.
+    inline float applyOffset (const Context& c, int t, float offset, int pos = -1)
     {
         const auto& r = c.ranges[(size_t) t];
         if (isOctaveScaled (t))
         {
-            const float oct = std::log2 (juce::jmax (1.0e-3f, c.baseReal[(size_t) t])) + offset * octavesAtFull (t);
+            const float oct = std::log2 (juce::jmax (1.0e-3f, c.baseRealAt (t, pos))) + offset * octavesAtFull (t);
             return juce::jlimit (r.start, r.end, std::exp2 (oct));
         }
-        return r.convertFrom0to1 (juce::jlimit (0.0f, 1.0f, c.baseNorm[(size_t) t] + offset));
+        return r.convertFrom0to1 (juce::jlimit (0.0f, 1.0f, c.baseNormAt (t, pos) + offset));
     }
 }
