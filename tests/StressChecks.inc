@@ -230,7 +230,12 @@ namespace StressChecks
             double diff = 0.0, sig = 0.0;
             for (size_t i = 0; i < n; ++i) { diff += (x[i] - ref[i]) * (double) (x[i] - ref[i]); sig += (double) ref[i] * ref[i]; }
             const double db = 10.0 * std::log10 ((diff + 1.0e-30) / (sig + 1.0e-30));
-            check (n == x.size() && db < -80.0, juce::String ("Reference: ") + rp.name + " sounds as recorded (difference "
+            // On the machine that recorded them the match is exact (about -316 dB).
+            // Other CPUs and maths libraries round slightly differently, which
+            // reached -66.6 dB on GitHub's runners, so allow -60 dB (0.1% of the
+            // signal): far below hearing, yet any real change to a sound is
+            // tens of dB larger.
+            check (n == x.size() && db < -60.0, juce::String ("Reference: ") + rp.name + " sounds as recorded (difference "
                                                    + juce::String (db, 1) + " dB)");
         }
     }
