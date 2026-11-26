@@ -4,6 +4,7 @@
 #include <juce_audio_utils/juce_audio_utils.h>
 #include "SynthEngine.h"
 #include "OutputFollower.h"
+#include "Limiter.h"
 
 class SNSynthProcessor : public juce::AudioProcessor
 {
@@ -19,6 +20,7 @@ public:
     using juce::AudioProcessor::processBlockBypassed;
     void processBlockBypassed (juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
     void markStateChanged();             // tell the DAW the project changed (drum grid, routings, chain)
+    std::atomic<int> uiStateEpoch { 0 };   // goes up when the drum grid, routings or a whole save change (screen redraws)
     bool isBusesLayoutSupported (const BusesLayout& layouts) const override;
     void processBlock (juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
     using AudioProcessor::processBlock;
@@ -104,6 +106,7 @@ private:
     float volModDbNow = 0.0f;
 public:
     int loadedFormatVersion = StateIDs::currentFormatVersion; // format of the last loaded save
+    bool drumsAreResting() const { return drumsResting; }      // for the checks
 private:            // Volume modulation in dB, gliding between chunks // false until the first block after prepareToPlay
     Mod::Context modContext;
     std::array<std::atomic<float>*, Mod::numTargets> targetParams {};
@@ -113,8 +116,8 @@ private:            // Volume modulation in dB, gliding between chunks // false 
     std::array<float, 2> lfoSmoothed { 0.0f, 0.0f }, lfoRandom { 0.0f, 0.0f };
     juce::Random lfoRng { 12345 };
     juce::SmoothedValue<float> voiceComp { 1.0f };
-    float limiterEnv = 0.0f, limiterRelease = 0.9999f;
-    static constexpr float limiterCeiling = 0.966f; // -0.3 dB
+    TruePeakLimiter limiter;
+    static constexpr float limiterCeiling = TruePeakLimiter::ceiling; // -0.3 dB
     std::array<std::vector<float>, 1 + Chain::numBlocks> tapBuffers; // oscillators, then after each chain position
     double currentSampleRate = 44100.0;
 
@@ -135,6 +138,9 @@ private:            // Volume modulation in dB, gliding between chunks // false 
     std::array<std::vector<float>, Drums::numRoutes> drumBus; // dry, into Filter 1, 2, 3
     std::vector<float> drumOut;
     float drumDcX1 = 0.0f, drumDcY1 = 0.0f, drumDcCoef = 0.9993f;
+    // The drums' filters rest once the drums have been silent for 100 ms.
+    bool drumsResting = true;
+    int drumQuietRun = 0;
     std::atomic<uint32_t> auditionMask { 0 };
     static constexpr float drumGain = 0.4f;
     std::unique_ptr<OutputFollower> outputFollower; // standalone app: follow the Mac's system output

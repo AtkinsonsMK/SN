@@ -21,6 +21,11 @@ namespace Vis
     public:
         explicit Display (SNSynthProcessor& p) : processor (p) { setInterceptsMouseClicks (false, false); }
 
+        // When the picture can change without a setting changing, so the
+        // editor redraws only what moved.
+        enum class Motion { onlyWithSettings, whilePlaying, always };
+        virtual Motion motion() const { return Motion::onlyWithSettings; }
+
     protected:
         float param (const juce::String& id) const { return processor.parameters.getRawParameterValue (id)->load(); }
         void paintScreen (juce::Graphics& g) const
@@ -60,6 +65,7 @@ namespace Vis
         float rmsDb = -100.0f, peakDb = -100.0f, holdDb = -100.0f;
         int holdFrames = 0;
         bool clip = false;
+        juce::int64 drawnKey = -1; // what was last drawn, to skip identical redraws
     };
 
     // Filter response curve for one slot, following the live cutoff.
@@ -68,6 +74,7 @@ namespace Vis
     public:
         FilterCurve (SNSynthProcessor& p, int slot) : Display (p), slotIndex (slot) {}
         void paint (juce::Graphics&) override;
+        Motion motion() const override { return Motion::whilePlaying; } // follows the live cutoff
 
     private:
         int slotIndex;
@@ -79,6 +86,7 @@ namespace Vis
     public:
         EnvelopeShape (SNSynthProcessor& p, bool isFilterEnvelope) : Display (p), filterEnv (isFilterEnvelope) {}
         void paint (juce::Graphics&) override;
+        Motion motion() const override { return Motion::whilePlaying; } // the newest note's dot
 
     private:
         bool filterEnv;
@@ -91,6 +99,7 @@ namespace Vis
     public:
         LfoShape (SNSynthProcessor& p, int lfoIndex) : Display (p), index (lfoIndex) {}
         void paint (juce::Graphics&) override;
+        Motion motion() const override { return Motion::always; } // free-running position dot
 
     private:
         int index;

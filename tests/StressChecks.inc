@@ -260,5 +260,20 @@ namespace StressChecks
         const double load = 100.0 * secs / 5.0;
         std::cout << "BENCH  16 voices, 3 filters at 4x, FM on: " << juce::String (load, 1) << "% of one core" << std::endl;
         check (load < 150.0, "CPU benchmark runs (" + juce::String (load, 1) + "% of one core; fails only above 150%)");
+
+        // Silent: the same patch after every note has finished.
+        {
+            juce::MidiBuffer off;
+            for (int n = 0; n < 16; ++n) off.addEvent (juce::MidiMessage::noteOff (1, 40 + n * 2), 0);
+            p->processBlock (buf, off);
+            for (int b = 0; b < (int) (sr * 3.0 / 512); ++b) { juce::MidiBuffer none; p->processBlock (buf, none); } // let tails finish
+            const int idleBlocks = (int) (sr * 20.0 / 512);
+            const auto i0 = juce::Time::getHighResolutionTicks();
+            for (int b = 0; b < idleBlocks; ++b) { juce::MidiBuffer none; p->processBlock (buf, none); }
+            const double idleSecs = juce::Time::highResolutionTicksToSeconds (juce::Time::getHighResolutionTicks() - i0);
+            const double idle = 100.0 * idleSecs / 20.0;
+            std::cout << "BENCH  silent (no notes, drums stopped): " << juce::String (idle, 2) << "% of one core" << std::endl;
+            check (idle < 1.0, "Silent synth rests (" + juce::String (idle, 2) + "% of one core, target under 1%)");
+        }
     }
 }

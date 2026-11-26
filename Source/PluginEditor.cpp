@@ -1,3 +1,4 @@
+#include <cstring>
 #include "PluginEditor.h"
 #include "Parameters.h"
 #include "Filters.h"
@@ -339,10 +340,48 @@ void SNSynthEditor::timerCallback()
         if (auto* peer = getPeer(); peer != nullptr && peer->isFocused() && juce::Process::isForegroundProcess())
             grabKeyboardFocus();
 
+    // Redraw only what changed. One fingerprint covers every setting the
+    // pictures are drawn from: all controls, the routings, the chain order,
+    // the selected mod source and any drum-grid edit or loaded save.
+    std::uint64_t sig = 1469598103934665603ull;
+    auto mix = [&sig] (std::uint32_t v) { sig = (sig ^ v) * 1099511628211ull; };
+    auto mixFloat = [&mix] (float f) { std::uint32_t u; std::memcpy (&u, &f, sizeof u); mix (u); };
+    for (auto* prm : processor.getParameters())
+        mixFloat (prm->getValue());
+    for (int src = 0; src < Mod::numSources; ++src)
+        for (int t = 0; t < Mod::numTargets; ++t)
+            mixFloat (processor.modMatrix.get (src, t));
+    for (int b : processor.getChainOrder()) mix ((std::uint32_t) b);
+    mix ((std::uint32_t) (modSource + 1));
+    mix ((std::uint32_t) processor.uiStateEpoch.load());
+    const bool settingsChanged = sig != drawnSignature;
+    drawnSignature = sig;
+
+    // Pictures that follow the playing notes keep moving while anything
+    // sounds, plus one more frame to settle at rest.
+    const int voicesNow = processor.getActiveVoiceCount();
+    const bool sounding = voicesNow > 0 || processor.live.noteActive.load();
+    const bool animate = sounding || wasSounding;
+    wasSounding = sounding;
+
     for (auto* d : displays)
-        d->repaint();
-    outputMeter.tick();
-    content.repaint (0, 0, baseW, 60); // "n playing" in the header
+    {
+        const auto* vd = dynamic_cast<Vis::Display*> (d);
+        const auto motion = vd != nullptr ? vd->motion() : Vis::Display::Motion::always;
+        if (settingsChanged || motion == Vis::Display::Motion::always
+            || (motion == Vis::Display::Motion::whilePlaying && animate))
+        {
+            d->repaint();
+            ++redrawRequests;
+        }
+    }
+    outputMeter.tick(); // redraws itself only when the reading moves
+    if (voicesNow != drawnVoiceCount)
+    {
+        drawnVoiceCount = voicesNow;
+        content.repaint (0, 0, baseW, 60); // "n playing" in the header
+        ++redrawRequests;
+    }
 
     // Redraw rings and the list when routings change (also from loading a project).
     float sum = 0.0f;
@@ -354,17 +393,28 @@ void SNSynthEditor::timerCallback()
         matrixChecksum = sum;
         modulationChanged();
     }
-    // Rings follow their knob's value; cheap to repaint the ones in use.
-    for (auto* r : rings)
-        r->repaint();
 
     for (auto& sp : slots)
         updateSlotTypeDisplay (sp);
 
-    chainStrip.repaint();
+    if (settingsChanged)
+    {
+        // Rings follow their knob's value and routings; the chain strip
+        // shows the order and filter types.
+        for (auto* r : rings)
+            r->repaint();
+        chainStrip.repaint();
+        redrawRequests += (int) rings.size() + 1;
+    }
 
     // Drums: the playing step, and each drum's name lights up when it plays.
-    drumGrid.repaint();
+    const int stepNow = processor.drumStep.load();
+    if (settingsChanged || stepNow != drawnDrumStep)
+    {
+        drawnDrumStep = stepNow;
+        drumGrid.repaint();
+        ++redrawRequests;
+    }
     drumPlayButton.setButtonText (drumPlayButton.getToggleState() ? "Stop" : "Play");
     for (int d = 0; d < Drums::numDrums; ++d)
     {

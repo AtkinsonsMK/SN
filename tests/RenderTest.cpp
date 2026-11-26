@@ -488,6 +488,8 @@ namespace SoundChecks
     }
 }
 
+#include "Phase4Checks.inc"
+
 int main (int argc, char** argv)
 {
     juce::ScopedJuceInitialiser_GUI juceInit;
@@ -507,6 +509,7 @@ int main (int argc, char** argv)
     if (argc > 1 && juce::String (argv[1]) == "--sound")
     {
         SoundChecks::run (sr);
+        Phase4Checks::run (sr);
         std::cout << (failures == 0 ? "All checks passed" : juce::String (failures) + " check(s) failed") << std::endl;
         return failures == 0 ? 0 : 1;
     }
@@ -1454,8 +1457,10 @@ int main (int argc, char** argv)
             onlyStep (*p, Drums::kick, { 0, 8 });
             setParam (*p, ParamIDs::drumPlay, 1.0f);
             auto out = renderSilent (*p, (int) (sr * 1.5));
-            const int first = firstAbove (out, 0, 0.01f);
-            const int second = firstAbove (out, 8 * stepLen - 100, 0.01f);
+            // Timed as a DAW hears it: minus the limiter's reported look-ahead.
+            const int lat = p->getLatencySamples();
+            const int first = firstAbove (out, 0, 0.01f) - lat;
+            const int second = firstAbove (out, 8 * stepLen - 100, 0.01f) - lat;
             check (first >= 0 && first < 64 && std::abs (second - 8 * stepLen) < 64,
                    "Kick on steps 1 and 9 plays on time at 120 BPM (at " + juce::String (first) + " and " + juce::String (second) + " samples)");
         }
@@ -1467,7 +1472,7 @@ int main (int argc, char** argv)
             setParam (*p, ParamIDs::drumSwing, 100.0f);
             setParam (*p, ParamIDs::drumPlay, 1.0f);
             auto out = renderSilent (*p, (int) sr);
-            const int at = firstAbove (out, 0, 0.01f);
+            const int at = firstAbove (out, 0, 0.01f) - p->getLatencySamples();
             const int expected = stepLen + stepLen / 2;
             check (std::abs (at - expected) < 64, "Swing 100% moves step 2 half a step later (at " + juce::String (at) + ", expected " + juce::String (expected) + ")");
         }
@@ -1746,6 +1751,7 @@ int main (int argc, char** argv)
     }
 
     SoundChecks::run (sr);
+    Phase4Checks::run (sr);
 
     std::cout << (failures == 0 ? "All checks passed" : juce::String (failures) + " check(s) failed") << std::endl;
     return failures == 0 ? 0 : 1;

@@ -61,10 +61,10 @@ void SNSynthProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     currentSampleRate = sampleRate;
     for (auto& b : lfoBuffers)
         b.assign ((size_t) juce::jmax (samplesPerBlock, 512), 0.0f);
-    limiterRelease = std::exp (-1.0f / (0.15f * (float) sampleRate));
+    limiter.prepare (sampleRate);
+    setLatencySamples (limiter.latency()); // the limiter's look-ahead, on or off
     drumDcCoef = (float) std::exp (-2.0 * juce::MathConstants<double>::pi * 5.0 / sampleRate);
     drumDcX1 = drumDcY1 = 0.0f;
-    limiterEnv = 0.0f;
     voiceComp.reset (sampleRate, 0.05);
     voiceComp.setCurrentAndTargetValue (1.0f);
     for (auto& t : tapBuffers)
@@ -202,22 +202,19 @@ void SNSynthProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
             if (peak > 1.0f)
                 live.outClipped.store (true); // would have gone over 0 dB
 
-            // Output Limiter: holds the output just under 0 dB. It reacts
-            // instantly to peaks and lets go over about 150 ms.
-            if (limiterOn)
+            // Output Limiter: looks 1.5 ms ahead and watches the peaks between
+            // samples, so it eases the level down before a peak instead of
+            // bending the wave (see Limiter.h). Lets go over about 150 ms.
             {
-                limiterEnv = juce::jmax (peak, limiterEnv * limiterRelease);
-                if (limiterEnv > limiterCeiling)
-                {
-                    const float lg = limiterCeiling / limiterEnv;
-                    for (int ch = 0; ch < numChannels; ++ch)
-                        buffer.getWritePointer (ch)[i] *= lg;
-                    synthOutTap[(size_t) i] *= lg;
+                float frame[TruePeakLimiter::maxChannels] {};
+                const int nch = juce::jmin (numChannels, TruePeakLimiter::maxChannels);
+                for (int ch = 0; ch < nch; ++ch) frame[ch] = buffer.getReadPointer (ch)[i];
+                const float lg = limiter.process (frame, nch, limiterOn);
+                for (int ch = 0; ch < nch; ++ch) buffer.getWritePointer (ch)[i] = frame[ch];
+                synthOutTap[(size_t) i] *= lg; // the display isn't delayed; close enough to show the effect
+                if (lg < 0.999f)
                     live.limiting.store (true);
-                }
             }
-            else
-                limiterEnv = 0.0f;
 
             // Safety ceiling, always on even with the Limiter off: nothing
             // leaves the synth above -0.3 dB. With the Limiter off, loud
@@ -425,6 +422,7 @@ void SNSynthProcessor::renderDrums (int numSamples)
                         hitDrum (d);
             }
         }
+        bool anyDrumActive = false;
         for (int d = 0; d < Drums::numDrums; ++d)
         {
             auto& v = drumVoices[(size_t) d];
@@ -432,7 +430,10 @@ void SNSynthProcessor::renderDrums (int numSamples)
             auto& lvl = drumLevelSmooth[(size_t) d];
             lvl += (ds.level - lvl) * drumSmoothCoef;
             if (v.isActive())
+            {
+                anyDrumActive = true;
                 drumBus[(size_t) ds.route][(size_t) i] += v.next() * lvl * drumGain;
+            }
         }
 
         // Filter and EQ settings for the drums: the knobs, moved by the LFOs
@@ -473,6 +474,26 @@ void SNSynthProcessor::renderDrums (int numSamples)
             drumEq.update (currentSampleRate, drumEqDb[0], drumEqDb[1], drumEqDb[2]);
         }
 
+        if (anyDrumActive && drumsResting)
+        {
+            // Waking up: the filters start clean, already at their settings.
+            drumsResting = false;
+            drumQuietRun = 0;
+            for (int b = 0; b < 3; ++b)
+            {
+                const auto& slot = drumCur.slots[b];
+                drumSmooth[(size_t) b] = { std::log2 (juce::jmax (1.0f, slot.cutoffHz)), slot.resonance, slot.drive, slot.character };
+            }
+            for (int e = 0; e < 3; ++e)
+                drumEqDb[(size_t) e] = e == 0 ? drumCur.eqLowDb : (e == 1 ? drumCur.eqMidDb : drumCur.eqHighDb);
+            drumEq.update (currentSampleRate, drumEqDb[0], drumEqDb[1], drumEqDb[2]);
+        }
+        if (drumsResting)
+        {
+            drumOut[(size_t) i] = 0.0f; // nothing playing: the filters sleep
+            continue;
+        }
+
         float x = 0.0f;
         for (int n = 0; n < Chain::numBlocks; ++n)
         {
@@ -509,6 +530,21 @@ void SNSynthProcessor::renderDrums (int numSamples)
         drumDcY1 = blocked;
         x = blocked;
         drumOut[(size_t) i] = x + drumBus[0][(size_t) i];
+
+        // Once no drum is playing and the filters' ring has died away
+        // (under -140 dB for 100 ms), let them sleep.
+        if (! anyDrumActive && std::abs (x) < 1.0e-7f)
+        {
+            if (++drumQuietRun >= (int) (0.1 * currentSampleRate))
+            {
+                drumsResting = true;
+                for (auto& f : drumFilters) f.reset();
+                drumEq.reset();
+                drumDcX1 = drumDcY1 = 0.0f;
+            }
+        }
+        else
+            drumQuietRun = 0;
     }
 }
 
@@ -561,6 +597,7 @@ void SNSynthProcessor::setChainOrder (std::array<int, Chain::numBlocks> order)
 
 void SNSynthProcessor::markStateChanged()
 {
+    ++uiStateEpoch;
     updateHostDisplay (ChangeDetails().withNonParameterStateChanged (true));
 }
 
@@ -579,7 +616,9 @@ void SNSynthProcessor::silenceAllVoices()
     for (auto& f : drumFilters) f.reset();
     drumEq.reset();
     drumDcX1 = drumDcY1 = 0.0f;
-    limiterEnv = 0.0f;
+    drumsResting = true;
+    drumQuietRun = 0;
+    limiter.reset();
 }
 
 void SNSynthProcessor::reset()
@@ -793,6 +832,7 @@ void SNSynthProcessor::getStateInformation (juce::MemoryBlock& destData)
 
 void SNSynthProcessor::setStateInformation (const void* data, int sizeInBytes)
 {
+    ++uiStateEpoch; // the screen redraws everything after a load
     if (auto xml = getXmlFromBinary (data, sizeInBytes))
         if (xml->hasTagName (parameters.state.getType()))
         {
