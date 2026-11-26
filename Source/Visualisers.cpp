@@ -82,14 +82,15 @@ namespace
 
             case FilterType::formant:
             {
-                const auto& vowel = FilterShape::formantTable()[FilterShape::formantVowel (character)];
                 const float scale = cutoff / FilterShape::formantReferenceHz;
                 const float d = 1.0f / FilterShape::formantQ (res);
                 C sum (0.0f, 0.0f);
                 for (int b = 0; b < 3; ++b)
                 {
-                    const C sb (0.0f, hz / (vowel[b][0] * scale));
-                    sum += (sb / (sb * sb + d * sb + 1.0f)) * d * 2.0f * vowel[b][1];
+                    float bandHz, level;
+                    FilterShape::formantBand (character, b, bandHz, level);
+                    const C sb (0.0f, hz / (bandHz * scale));
+                    sum += (sb / (sb * sb + d * sb + 1.0f)) * d * 2.0f * level;
                 }
                 return std::abs (sum) * 2.5f;
             }
@@ -269,6 +270,8 @@ void EnvelopeShape::paint (juce::Graphics& g)
     {
         A = env.attack.load(); D = env.decay.load(); S = env.sustain.load(); R = env.release.load();
     }
+    const double ratio = stage != 0 ? (double) env.curveRatio.load()
+                                    : Envelope::curveRatio (param (filterEnv ? fenvCurve : aenvCurve) * 0.01f);
 
     // A retriggered note's attack starts from where the last one was; a
     // release starts from wherever the note was when the key was let go.
@@ -279,9 +282,9 @@ void EnvelopeShape::paint (juce::Graphics& g)
     // How long each stage really lasts. Widths follow the square root of
     // each time, so short and long settings both stay readable; sustain
     // gets a fixed quarter.
-    const float tA = Envelope::stageSeconds (1, A, attackStart, S);
-    const float tD = Envelope::stageSeconds (2, D, 1.0f, S);
-    const float tR = Envelope::stageSeconds (4, R, releaseStart, S);
+    const float tA = Envelope::stageSeconds (1, A, attackStart, S, ratio);
+    const float tD = Envelope::stageSeconds (2, D, 1.0f, S, ratio);
+    const float tR = Envelope::stageSeconds (4, R, releaseStart, S, ratio);
     const float wa = std::sqrt (tA), wd = std::sqrt (tD), wr = std::sqrt (tR);
     const float scale = r.getWidth() * 0.75f / juce::jmax (1.0e-4f, wa + wd + wr);
     const float xA = wa * scale, xD = wd * scale, xS = r.getWidth() * 0.25f, xR = wr * scale;
@@ -299,7 +302,7 @@ void EnvelopeShape::paint (juce::Graphics& g)
         for (int i = 1; i <= steps; ++i)
         {
             const float f = (float) i / (float) steps;
-            p.lineTo (xStart + f * width, yFor (Envelope::curveLevel (st, f, from, S)));
+            p.lineTo (xStart + f * width, yFor (Envelope::curveLevel (st, f, from, S, ratio)));
         }
     };
     segment (1, x0, xA, attackStart);
@@ -319,10 +322,10 @@ void EnvelopeShape::paint (juce::Graphics& g)
     float x = x0, y = yFor (level);
     switch (stage)
     {
-        case 1: { const float f = Envelope::curveFraction (1, level, attackStart, S);  x = x0 + xA * f; y = yFor (Envelope::curveLevel (1, f, attackStart, S)); break; }
-        case 2: { const float f = Envelope::curveFraction (2, level, 1.0f, S);         x = x1 + xD * f; y = yFor (Envelope::curveLevel (2, f, 1.0f, S)); break; }
+        case 1: { const float f = Envelope::curveFraction (1, level, attackStart, S, ratio);  x = x0 + xA * f; y = yFor (Envelope::curveLevel (1, f, attackStart, S, ratio)); break; }
+        case 2: { const float f = Envelope::curveFraction (2, level, 1.0f, S, ratio);         x = x1 + xD * f; y = yFor (Envelope::curveLevel (2, f, 1.0f, S, ratio)); break; }
         case 3:   x = x2 + xS * 0.5f; y = yFor (S); break;
-        case 4: { const float f = Envelope::curveFraction (4, level, releaseStart, S); x = x3 + xR * f; y = yFor (Envelope::curveLevel (4, f, releaseStart, S)); break; }
+        case 4: { const float f = Envelope::curveFraction (4, level, releaseStart, S, ratio); x = x3 + xR * f; y = yFor (Envelope::curveLevel (4, f, releaseStart, S, ratio)); break; }
         default: break;
     }
     g.setColour (Theme::accent);

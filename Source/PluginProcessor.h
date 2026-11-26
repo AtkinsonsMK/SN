@@ -77,7 +77,7 @@ private:
     void renderDrums (int numSamples);
     void hitDrum (int d);
 
-    struct SlotParams { std::atomic<float> *type, *cutoff, *res, *drive, *env, *character, *levelMatch; };
+    struct SlotParams { std::atomic<float> *type, *cutoff, *res, *drive, *env, *character, *levelMatch, *keepBass; };
     std::array<SlotParams, 3> slotParams {};
     // The whole chain order packed into one value (3 bits per position), so
     // the sound can never read it half-changed while the screen rearranges it.
@@ -100,6 +100,7 @@ private:
     SynthEngine synth { voiceSettings };
     float meterMeanSquare = 0.0f;
     bool rampFromLastBlock = false;
+    std::atomic<bool> jumpToKnobs { false }; // set when a project loads
     juce::uint64 gridClock = 0;          // samples since playback started (for the modulation grid)
     std::array<float, 2> lfoRateNow { 1.0f, 1.0f }, lfoCoefNow { 1.0f, 1.0f };
     bool lfoNeedsUpdate = true;

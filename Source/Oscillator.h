@@ -30,7 +30,9 @@ public:
     }
 
     // inc: cycles per sample. pm: phase offset in cycles from FM.
-    float next (double inc, double pm, const OscSettings& s, float smooth)
+    // blepWidth: how many samples each smoothed jump spreads over (1 normally;
+    // wider when running oversampled, where the extra smoothing is all above hearing).
+    float next (double inc, double pm, const OscSettings& s, float smooth, double blepWidth = 1.0)
     {
         sSine  += (s.sine       - sSine)  * smooth;
         sSaw   += (s.saw        - sSaw)   * smooth;
@@ -47,7 +49,7 @@ public:
         dp -= std::floor (dp + 0.5);
         prevP = p;
         const bool backwards = dp < 0.0;
-        const double dt = std::clamp (std::abs (dp), 1.0e-9, 0.5);
+        const double dt = std::clamp (std::abs (dp) * blepWidth, 1.0e-9, 0.5);
         // Moving backwards, the wave is the forward wave seen in a mirror
         // (q = 1 - p), so the same smoothing applies with the signs swapped.
         const double q = backwards ? 1.0 - p : p;
@@ -84,6 +86,9 @@ public:
         lastOut = out;
         return out;
     }
+
+    // Start the wave at a given point of its cycle (0..1), for Start Phase: Random.
+    void setPhase (double p) { phase = p - std::floor (p); prevP = phase; }
 
     double getPhase() const { return phase; }
     float  getLastOut() const { return lastOut; }

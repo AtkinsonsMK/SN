@@ -116,6 +116,8 @@ struct SlotPanel
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> typeAttachment;
     juce::ToggleButton levelMatch { "Match" };
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> levelMatchAttachment;
+    juce::ToggleButton keepBass { "Keep Bass" };
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> keepBassAttachment;
     KnobGroup group;
     Knob* characterKnob = nullptr;
     int shownType = -1;

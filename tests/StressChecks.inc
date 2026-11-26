@@ -112,6 +112,15 @@ namespace StressChecks
     {
         auto p = make (48000.0, 512);
         setParam (*p, ParamIDs::drift, 0);
+        // Recorded before Stereo Spread, Voice Variation and Start Phase: with
+        // them off, the sound must still match exactly.
+        setParam (*p, ParamIDs::spread, 0);
+        setParam (*p, ParamIDs::variation, 0);
+        setParam (*p, ParamIDs::startPhase, 0);
+        // Envelope times as an older project loads them (Decay and Release now
+        // mean the -40 dB point, so they are converted to keep the same sound).
+        for (auto* id : { ParamIDs::fenvDecay, ParamIDs::fenvRelease, ParamIDs::aenvDecay, ParamIDs::aenvRelease })
+            setParam (*p, id, paramValue (*p, id) / (float) Envelope::stretch (Envelope::classicRatio));
         rp.set (*p);
         std::vector<float> out;
         juce::AudioBuffer<float> buf (2, 512);

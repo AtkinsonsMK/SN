@@ -21,6 +21,7 @@ struct LiveInfo
         std::atomic<int>   stage { 0 };
         std::atomic<float> level { 0.0f }, startLevel { 0.0f };
         std::atomic<float> attack { 0.001f }, decay { 0.3f }, sustain { 1.0f }, release { 0.2f };
+        std::atomic<float> curveRatio { 0.0001f }; // the envelope's Curve, as Envelope::curveRatio
     };
     EnvState filterEnv, ampEnv;
     std::atomic<float> lfoPhase { 0.0f }, lfo2Phase { 0.0f };

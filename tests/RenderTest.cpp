@@ -166,6 +166,10 @@ namespace SoundChecks
         setParam (*p, ParamIDs::drift, 0);
         setParam (*p, ParamIDs::limiter, 0);
         setParam (*p, ParamIDs::volume, -12);
+        // The older checks measure one plain voice: mono, identical voices, reset phase.
+        setParam (*p, ParamIDs::spread, 0);
+        setParam (*p, ParamIDs::variation, 0);
+        setParam (*p, ParamIDs::startPhase, 0);
         return p;
     }
 
@@ -489,6 +493,8 @@ namespace SoundChecks
 }
 
 #include "Phase4Checks.inc"
+#include "StereoChecks.inc"
+#include "Batch2Checks.inc"
 
 int main (int argc, char** argv)
 {
@@ -506,10 +512,13 @@ int main (int argc, char** argv)
         std::cout << (failures == 0 ? "All checks passed" : juce::String (failures) + " check(s) failed") << std::endl;
         return failures == 0 ? 0 : 1;
     }
+    if (const char* w = std::getenv ("SN_BLEPW")) SynthVoice::osBlepWidth = std::atof (w);
     if (argc > 1 && juce::String (argv[1]) == "--sound")
     {
         SoundChecks::run (sr);
         Phase4Checks::run (sr);
+        StereoChecks::run (sr);
+        Batch2Checks::run (sr);
         std::cout << (failures == 0 ? "All checks passed" : juce::String (failures) + " check(s) failed") << std::endl;
         return failures == 0 ? 0 : 1;
     }
@@ -638,12 +647,13 @@ int main (int argc, char** argv)
             { ParamIDs::sawLevel, 100 }, { ParamIDs::pulseLevel, 0 }, { ParamIDs::pulseWidth, 50 }, { ParamIDs::subLevel, 0 },
             { ParamIDs::fenvAttack, 0.001f }, { ParamIDs::fenvDecay, 0.4f }, { ParamIDs::fenvSustain, 30 }, { ParamIDs::fenvRelease, 0.3f },
             { ParamIDs::aenvAttack, 0.001f }, { ParamIDs::aenvDecay, 0.3f }, { ParamIDs::aenvSustain, 100 }, { ParamIDs::aenvRelease, 0.2f },
-            { ParamIDs::lfoRate, 4 }, { ParamIDs::lfoCutoff, 0 }, { ParamIDs::drift, 15 }, { ParamIDs::glide, 0 },
+            { ParamIDs::lfoRate, 4 }, { ParamIDs::lfoCutoff, 0 }, { ParamIDs::drift, 30 }, { ParamIDs::glide, 0 },
             { ParamIDs::volume, -6 },
             { ParamIDs::sineLevel, 0 }, { ParamIDs::osc1Coarse, 0 }, { ParamIDs::osc1Fine, 0 }, { ParamIDs::osc1Level, 100 },
             { ParamIDs::osc2Sine, 0 }, { ParamIDs::osc2Saw, 100 }, { ParamIDs::osc2Pulse, 0 }, { ParamIDs::osc2Pw, 50 },
             { ParamIDs::osc2Coarse, 0 }, { ParamIDs::osc2Fine, 7 }, { ParamIDs::osc2Level, 0 },
-            { ParamIDs::fm1to2, 0 }, { ParamIDs::fm2to1, 0 }, { ParamIDs::ringMod, 0 }, { ParamIDs::voices, 8 } };
+            { ParamIDs::fm1to2, 0 }, { ParamIDs::fm2to1, 0 }, { ParamIDs::ringMod, 0 }, { ParamIDs::voices, 8 },
+            { ParamIDs::spread, 50 }, { ParamIDs::variation, 25 }, { ParamIDs::startPhase, 1 } };
         bool allOk = true;
         for (auto& d : defaults)
         {
@@ -654,7 +664,7 @@ int main (int argc, char** argv)
                 allOk = false;
             }
         }
-        check (allOk, "All 32 non-filter controls have the documented defaults");
+        check (allOk, "All 35 non-filter controls have the documented defaults");
     }
 
     {
@@ -690,6 +700,9 @@ int main (int argc, char** argv)
         auto p = makeSynth (sr);
         setParam (*p, ParamIDs::glide, 1.0f);
         setParam (*p, ParamIDs::drift, 0);
+        setParam (*p, ParamIDs::spread, 0);     // pitch is counted by zero crossings of the two
+        setParam (*p, ParamIDs::startPhase, 0); // overlapping notes: keep them centred and in step,
+        setParam (*p, ParamIDs::aenvRelease, 0.01f); // and the first note gone quickly
         render (*p, 57, 20, false);                     // A3 held
         juce::AudioBuffer<float> block (2, 512);
         juce::MidiBuffer m; m.addEvent (juce::MidiMessage::noteOff (1, 57), 0);
@@ -772,7 +785,7 @@ int main (int argc, char** argv)
     {
         auto p = makeSynth (sr);
         const int total = (int) p->getParameters().size();
-        check (total == 95, "Synth has 95 controls (found " + juce::String (total) + ")");
+        check (total == 103, "Synth has 103 controls (found " + juce::String (total) + ")");
 
         bool ok = std::abs (paramValue (*p, sid (0, ParamIDs::slotType)) - FilterType::ota) < 0.01f
                && std::abs (paramValue (*p, sid (1, ParamIDs::slotType)) - FilterType::off) < 0.01f
@@ -844,7 +857,7 @@ int main (int argc, char** argv)
     {
         // Formant: the vowel changes the tone (I is brighter than U).
         float b[2]; int k = 0;
-        for (float vowel : { 50.0f, 90.0f })
+        for (float vowel : { 50.0f, 100.0f })
         {
             auto p = makeSynth (sr);
             setType (*p, 0, FilterType::formant);
@@ -1752,6 +1765,8 @@ int main (int argc, char** argv)
 
     SoundChecks::run (sr);
     Phase4Checks::run (sr);
+    StereoChecks::run (sr);
+        Batch2Checks::run (sr);
 
     std::cout << (failures == 0 ? "All checks passed" : juce::String (failures) + " check(s) failed") << std::endl;
     return failures == 0 ? 0 : 1;

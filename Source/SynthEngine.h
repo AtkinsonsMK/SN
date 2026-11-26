@@ -50,6 +50,23 @@ public:
     {
         if (voiceLimit > 1)
         {
+            // The same note played again while it still sounds (releasing, or
+            // held by the sustain pedal) goes back to the same voice, which
+            // carries on from where it is. Starting a second copy beside the
+            // fading one made the two interfere, so the repeat came out up to
+            // 5 dB louder or quieter depending on the exact timing.
+            const juce::ScopedLock sl (lock);
+            juce::SynthesiserVoice* same = nullptr;
+            for (auto* v : voices)
+                if (v->isVoiceActive() && v->getCurrentlyPlayingNote() == note && v->isPlayingChannel (channel))
+                    if (same == nullptr || same->wasStartedBefore (*v))
+                        same = v;
+            if (same != nullptr)
+            {
+                startVoice (same, getSound (0).get(), channel, note, velocity);
+                return;
+            }
+            settings.othersSounding = countActiveVoices();
             juce::Synthesiser::noteOn (channel, note, velocity);
             return;
         }

@@ -65,14 +65,16 @@ document.
 | | Ring Mod (Osc 1 × Osc 2: clangy, bell-like) | 0 to 100% | 0% |
 | | Voices (notes at once; 1 = Mono, legato, newest key wins) | Mono, 2 to 16 | 8 |
 | Filter Envelope | Attack | 0.5 ms to 10 s | 1 ms |
-| | Decay | 1 ms to 10 s | 400 ms |
+| | Decay (time to fall 99% of the way, -40 dB, as on hardware; moving Sustain mid-decay glides, never clicks) | 1 ms to 10 s | 400 ms |
 | | Sustain | 0 to 100% | 30% |
-| | Release | 1 ms to 15 s | 300 ms |
+| | Release (time to fall 99%, -40 dB) | 1 ms to 15 s | 300 ms |
+| | Curve (shape of Decay and Release: 0 = classic analogue curve, minus = straighter lines, plus = drops fast then a long soft tail; the times stay true) | -100 to +100% | 0% |
 | Amp Envelope | Attack | 0.5 ms to 10 s | 1 ms |
-| | Decay | 1 ms to 10 s | 300 ms |
+| | Decay (time to fall 99%, -40 dB) | 1 ms to 10 s | 300 ms |
 | | Sustain | 0 to 100% | 100% |
-| | Release | 1 ms to 15 s | 200 ms |
-| Mix and Voices | Drift (slow random pitch wander per note) | 0 to 100% (up to about ±10 cents) | 15% |
+| | Release (time to fall 99%, -40 dB) | 1 ms to 15 s | 200 ms |
+| | Curve (as on the Filter Envelope) | -100 to +100% | 0% |
+| Mix and Voices | Drift (slow random pitch wander; each oscillator of each note wanders on its own) | 0 to 100% (up to about ±10 cents) | 30% |
 | | Glide (slide between notes) | 0 to 2 s | 0 s |
 | Playing | Velocity (how much playing harder makes notes louder) | 0 to 100% | 50% |
 | | Key Track (how much filter cutoff follows the note you play) | 0 to 100% | 50% |
@@ -89,10 +91,14 @@ document.
 | | Drive | 0 to 100% | 0% |
 | | Env Amount | -100 to +100% | +40% / 0% / 0% |
 | | Match (Level Match: evens out loudness between filter types) | on / off | on |
-| | Type knob | OTA: Slope 24/12 dB; Sallen-Key: HP Cutoff 20 Hz to 2 kHz; Lowpass Gate: Gate Decay 0.12 to 3 s; Steiner-Parker: Mode LP/BP/HP; Polivoks: Mode LP/BP; Comb: Polarity +/-; Formant: Vowel A/E/I/O/U (Cutoff 1 kHz = natural voice) | 0% |
+| | Keep Bass (OTA only: turning up Resonance normally thins the low end, as on the hardware; on keeps the bass full) | on / off | off |
+| | Type knob | OTA: Slope 24/12 dB; Sallen-Key: HP Cutoff 20 Hz to 2 kHz; Lowpass Gate: Gate Decay 0.12 to 3 s; Steiner-Parker: Mode LP/BP/HP; Polivoks: Mode LP/BP; Comb: Polarity +/-; Formant: Vowel, gliding A (0%) > E (25%) > I (50%) > O (75%) > U (100%) (Cutoff 1 kHz = natural voice). Sallen-Key, Steiner-Parker and Polivoks self-oscillate at full Resonance: a steady, in-tune tone at the Cutoff, the same level at any pitch | 0% |
 | EQ | Low (shelf 100 Hz) | -12 to +12 dB | 0 dB |
 | | Mid (bell 1 kHz) | -12 to +12 dB | 0 dB |
 | | High (shelf 8 kHz) | -12 to +12 dB | 0 dB |
+| Playing | Spread (stereo width: a note on its own sits in the middle, extra notes fan out left and right; notes below C3 and all bass below 150 Hz stay centred) | 0 to 100% | 50% |
+| | Variation (small fixed differences between voices, like a real polysynth's voice cards: tuning up to ±8 cents, cutoff ±0.3 octave, envelope times ±25%, level ±1 dB at 100%) | 0 to 100% | 25% |
+| | Start Phase (Reset: every note's wave starts at the same point, punchy and identical; Random: each note starts somewhere new, more natural) | Reset / Random | Random |
 | Output | Volume | -inf to +6 dB | -6 dB |
 | | Limiter (keeps peaks just under 0 dB, smoothly) | on / off | on |
 | | Voice Gain Comp (turns chords down so they don't jump in level) | on / off | on |

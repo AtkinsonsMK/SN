@@ -18,6 +18,7 @@ struct VoiceSettings
     float ringMod = 0.0f;                        // 0..1
     float fenvA = 0.001f, fenvD = 0.4f, fenvS = 0.3f, fenvR = 0.3f;
     float aenvA = 0.001f, aenvD = 0.3f, aenvS = 1.0f, aenvR = 0.2f;
+    float fenvCurve = 0.0f, aenvCurve = 0.0f; // -1..1, see Envelope::setParameters
     float lfoToCutoff = 0.0f; // 0..1
     float drift = 0.15f;      // 0..1
     float glideSeconds = 0.0f;
@@ -38,6 +39,10 @@ struct VoiceSettings
     float velocityAmount = 0.5f;  // 0..1: how much velocity changes the volume
     float keyTracking = 0.5f;     // 0..1: how much the filter cutoff follows the note
     float bendRange = 2.0f;       // semitones
+    float spread = 0.0f;          // 0..1: stereo width of the voices
+    float variation = 0.0f;       // 0..1: fixed differences between voices
+    bool  randomPhase = false;    // each new note starts its waves at a random point
+    int   othersSounding = 0;     // set by the engine: notes already sounding when this one starts
     double lastNote = -1.0;     // most recent note played, for Glide
     bool mono = false;          // Voices = 1
     bool legatoNext = false;    // set by the engine: next startNote is a legato move
@@ -149,13 +154,28 @@ class SynthVoice : public juce::SynthesiserVoice
 {
 public:
     static constexpr float  maxDriftCents           = 10.0f;
+    static inline double    osBlepWidth             = 3.0; // jump smoothing width at 4x (samples); the normal path's is 4
     static constexpr int    modInterval             = 16; // modulation is updated every 16 samples
 
     static constexpr float envOctavesAtFull   = 6.0f;  // Env Amount 100% sweeps 6 octaves
     static constexpr float lfoOctavesAtFull   = 3.0f;  // LFO to Cutoff 100% = +/- 3 octaves
     static constexpr double fmDepthAtFull     = 0.5;   // FM 100% pushes the phase up to half a cycle
 
-    SynthVoice (VoiceSettings& s, int voiceIndex) : shared (s), cur (s), random ((juce::int64) (voiceIndex * 7919 + 17)) {}
+    // Voice Variation at 100%: how far each voice's fixed differences can go.
+    static constexpr float varTuneCents  = 8.0f;   // each oscillator's tuning, +/- cents
+    static constexpr float varCutoffOct  = 0.3f;   // filter cutoffs, +/- octaves (about +/-23%)
+    static constexpr float varEnvOct     = 0.32f;  // envelope times, x/÷ 2^0.32 (about +/-25%)
+    static constexpr float varLevelDb    = 1.0f;   // loudness, +/- dB
+    static constexpr float bassMonoHz    = 150.0f; // below this, every voice stays in the centre
+
+    SynthVoice (VoiceSettings& s, int voiceIndex) : shared (s), cur (s), random ((juce::int64) (voiceIndex * 7919 + 17))
+    {
+        // Each voice's own fixed "component tolerances", like the voice cards
+        // of a polyphonic analogue synth. Voice Variation scales them.
+        juce::Random tolRandom ((juce::int64) (voiceIndex * 104729 + 3));
+        for (auto& t : tol)
+            t = tolRandom.nextFloat() * 2.0f - 1.0f;
+    }
 
     bool canPlaySound (juce::SynthesiserSound* s) override
     {
@@ -173,6 +193,9 @@ public:
 
         for (auto& f : filters)
             f.prepare ((float) newRate);
+        for (auto& f : fadeFilters)
+            f.prepare ((float) newRate);
+        typeFadeLen = juce::jmax (1, (int) (0.01 * newRate)); // 10 ms
 
         smoothCoef = 1.0f - std::exp (-1.0f / (0.005f * (float) newRate)); // 5 ms
         smoothCoef4x = 1.0f - std::exp (-1.0f / (0.005f * 4.0f * (float) newRate));
@@ -183,7 +206,10 @@ public:
         oscDown2.design (keep / (4.0 * newRate));
         blockSmoothCoef = 1.0f - std::exp (-(float) modInterval / (0.005f * (float) newRate));
         driftCoef  = 1.0f - std::exp (-1.0f / (0.4f  * (float) newRate));  // 0.4 s
-        driftValue = (float) (random.nextFloat() * 2.0 - 1.0);
+        for (auto& d : drift)
+            d.value = d.target = random.nextFloat() * 2.0f - 1.0f;
+        panCoef   = 1.0f - std::exp (-1.0f / (0.01f * (float) newRate));    // 10 ms
+        bassCoef  = 1.0f - std::exp (-2.0f * juce::MathConstants<float>::pi * bassMonoHz / (float) newRate);
     }
 
     void startNote (int midiNote, float velocity, juce::SynthesiserSound*, int pitchWheel) override
@@ -214,6 +240,23 @@ public:
         // Velocity to Volume: at 50% the softest note is half as loud as the hardest.
         noteVelocity = velocity;
         noteGain = (1.0f - shared.velocityAmount) + shared.velocityAmount * velocity;
+        if (shared.variation > 0.0f)
+            noteGain *= juce::Decibels::decibelsToGain (shared.variation * tol[tolLevel] * varLevelDb);
+
+        // Stereo place: a note on its own sits in the middle; each extra note
+        // sounding with it takes the next place out (left, right, further...),
+        // so a chord fans out while a single melody line stays centred.
+        // The same note played again in this voice keeps its place.
+        const bool sameNoteGoesOn = ampEnv.isActive() && midiNote == panNote;
+        if (! sameNoteGoesOn)
+        {
+            static constexpr float pattern[8] = { 0.0f, -1.0f, 1.0f, -0.6f, 0.6f, -0.8f, 0.8f, -0.4f };
+            // Low notes stay nearer the centre: C2 and below in the middle,
+            // full width from C3 up.
+            const float lowKeep = juce::jlimit (0.0f, 1.0f, (float) (midiNote - 36) / 12.0f);
+            panPos = shared.mono ? 0.0f : pattern[(size_t) (shared.othersSounding & 7)] * lowKeep;
+        }
+        panNote = midiNote;
 
         if (! ampEnv.isActive())
         {
@@ -226,12 +269,26 @@ public:
             osc1.reset (shared.osc[0]);
             osc2.reset (shared.osc[1]);
             subPhase = 0.0;
+            if (shared.randomPhase)
+            {
+                // Start the waves at a random point, so no two notes begin
+                // identically. Both oscillators (and the sub, an octave down)
+                // start together, so their blend, and so the loudness, stays
+                // the same from note to note.
+                const double u = random.nextDouble();
+                subPhase = u;
+                osc1.setPhase (2.0 * u);
+                osc2.setPhase (2.0 * u);
+            }
             for (auto& f : filters)
                 f.reset();
+            for (int b = 0; b < 3; ++b) { lastType[b] = -1; typeFadeLeft[b] = 0; } // a new note takes the types as they are
             eq.reset();
             sSub = shared.subLevel;
             sFm12 = shared.fm1to2; sFm21 = shared.fm2to1; sRing = shared.ringMod;
             sLvl1 = shared.osc[0].level; sLvl2 = shared.osc[1].level;
+            bassS = 0.0f;
+            snapPan = true;
             snapSmoothing = true; // filter and tuning smoothing start at the knob values
         }
 
@@ -306,7 +363,8 @@ public:
             {
                 needsRefresh = false;
                 refreshSettings (pos);
-                const float keyTrackOct = cur.keyTracking * (float) (currentNote - 60.0) / 12.0f; // follows Glide
+                const float keyTrackOct = cur.keyTracking * (float) (currentNote - 60.0) / 12.0f // follows Glide
+                                          + cur.variation * tol[tolCutoff] * varCutoffOct;
                 // The knobs (and DAW automation) are smoothed; the modulation
                 // is added afterwards, gliding in a straight line to each new
                 // 16-sample value, so fast LFOs and envelopes keep their full
@@ -333,7 +391,7 @@ public:
                         sOct[s] = baseOct[s]; sRes[s] = slot.resonance; sDrive[s] = slot.drive;
                         sEnvAmt[s] = slot.envAmount; sChar[s] = slot.character;
                     }
-                    sTune1 = cur.osc[0].tuneSemitones(); sTune2 = cur.osc[1].tuneSemitones();
+                    sTune1 = tuneTarget (0); sTune2 = tuneTarget (1);
                     sEq[0] = cur.eqLowDb; sEq[1] = cur.eqMidDb; sEq[2] = cur.eqHighDb;
                     snapSmoothing = false;
                 }
@@ -342,6 +400,16 @@ public:
                 sEq[1] += (cur.eqMidDb  - sEq[1]) * blockSmoothCoef;
                 sEq[2] += (cur.eqHighDb - sEq[2]) * blockSmoothCoef;
                 eq.update (sr, sEq[0], sEq[1], sEq[2]);
+
+                // Stereo place (equal loudness at every position).
+                const float place = panPos * std::sqrt (cur.spread); // a gentle taper: 50% already sounds wide
+                const bool centred = std::abs (place) < 1.0e-6f;
+                const float theta = (place + 1.0f) * juce::MathConstants<float>::pi * 0.25f;
+                panL = centred ? 1.0f : juce::MathConstants<float>::sqrt2 * std::cos (theta);
+                panR = centred ? 1.0f : juce::MathConstants<float>::sqrt2 * std::sin (theta);
+                if (snapPan) { panLS = panL; panRS = panR; snapPan = false; }
+                panMoving = std::abs (panLS - panL) + std::abs (panRS - panR) > 1.0e-6f;
+                panActive = panMoving || ! centred;
             }
 
             // Smooth every continuous filter and tuning setting sample by
@@ -361,8 +429,8 @@ public:
                 sEnvAmt[s] += (slot.envAmount - sEnvAmt[s]) * smoothCoef;
                 sChar[s]   += (slot.character - sChar[s])   * smoothCoef;
             }
-            sTune1 += (cur.osc[0].tuneSemitones() - sTune1) * smoothCoef;
-            sTune2 += (cur.osc[1].tuneSemitones() - sTune2) * smoothCoef;
+            sTune1 += (tuneTarget (0) - sTune1) * smoothCoef;
+            sTune2 += (tuneTarget (1) - sTune2) * smoothCoef;
 
             // Parameter smoothing (avoids zipper noise when knobs move).
             sSub   += (cur.subLevel - sSub)   * smoothCoef;
@@ -383,22 +451,26 @@ public:
                 }
             }
 
-            // Drift: slow random wander per voice.
-            if (--driftCounter <= 0)
+            // Drift: slow random wander, separate for each oscillator of each
+            // voice, as two real analogue oscillators never drift together.
+            for (auto& d : drift)
             {
-                driftTarget = random.nextFloat() * 2.0f - 1.0f;
-                driftCounter = (int) (sr * (0.3 + 0.7 * random.nextFloat()));
+                if (--d.counter <= 0)
+                {
+                    d.target = random.nextFloat() * 2.0f - 1.0f;
+                    d.counter = (int) (sr * (0.3 + 0.7 * random.nextFloat()));
+                }
+                d.value += (d.target - d.value) * driftCoef;
             }
-            driftValue += (driftTarget - driftValue) * driftCoef;
-            const double driftSemis = cur.drift * maxDriftCents * driftValue / 100.0;
+            const double driftScale = cur.drift * maxDriftCents / 100.0;
 
             // Pitch bend glides over about 3 ms, so the wheel's steps can't be heard.
             bendS += (bendSemitones - bendS) * bendGlideCoef;
-            const double pitch = currentNote + bendS * cur.bendRange + driftSemis;
-            const double freq = 440.0 * std::pow (2.0, (pitch - 69.0) / 12.0);
-            const double tune1 = std::exp2 (sTune1 / 12.0), tune2 = std::exp2 (sTune2 / 12.0);
-            const double inc1 = juce::jmin (freq * tune1 / sr, 0.45);
-            const double inc2 = juce::jmin (freq * tune2 / sr, 0.45);
+            const double pitch = currentNote + bendS * cur.bendRange;
+            const double freq1 = 440.0 * std::exp2 ((pitch + driftScale * drift[0].value + sTune1 - 69.0) / 12.0);
+            const double freq2 = 440.0 * std::exp2 ((pitch + driftScale * drift[1].value + sTune2 - 69.0) / 12.0);
+            const double inc1 = juce::jmin (freq1 / sr, 0.45);
+            const double inc2 = juce::jmin (freq2 / sr, 0.45);
 
             // Each oscillator can push the other's phase (FM). Osc 2 -> 1
             // uses Osc 2's previous sample, which is how a feedback loop works.
@@ -419,9 +491,9 @@ public:
                     // sudden jump would otherwise jerk the other oscillator's phase
                     // and spray tones everywhere.
                     fmLp21[0] += (osc2.getLastOut() - fmLp21[0]) * fmLpCoef; fmLp21[1] += (fmLp21[0] - fmLp21[1]) * fmLpCoef;
-                    const float a = osc1.next (inc1 * 0.25, sFm21 * fmDepthAtFull * fmLp21[1], cur.osc[0], smoothCoef4x);
+                    const float a = osc1.next (inc1 * 0.25, sFm21 * fmDepthAtFull * fmLp21[1], cur.osc[0], smoothCoef4x, osBlepWidth);
                     fmLp12[0] += (a - fmLp12[0]) * fmLpCoef; fmLp12[1] += (fmLp12[0] - fmLp12[1]) * fmLpCoef;
-                    const float b = osc2.next (inc2 * 0.25, sFm12 * fmDepthAtFull * fmLp12[1], cur.osc[1], smoothCoef4x);
+                    const float b = osc2.next (inc2 * 0.25, sFm12 * fmDepthAtFull * fmLp12[1], cur.osc[1], smoothCoef4x, osBlepWidth);
                     m[k] = sLvl1 * a + sLvl2 * b + sRing * a * b;
                 }
                 const float h0 = oscDown2.down (m[0], m[1]); // (in time order)
@@ -465,7 +537,33 @@ public:
                     slot.character = juce::jlimit (0.0f, 1.0f, sChar[b] + mb[4]);
                     const float cutoffOct = sOct[b] + mb[0] + fenv * (sEnvAmt[b] + mb[3]) * envOctavesAtFull + lfoOct;
                     lastCutoffHz[b] = std::exp2 (juce::jlimit (4.3f, 14.3f, cutoffOct));
-                    x = filters[b].process (x, slot, lastCutoffHz[b]);
+
+                    // Filter type changed mid-note: the old type carries on
+                    // in a spare filter and fades out over 10 ms while the new
+                    // one fades in, instead of the sound jumping (a click).
+                    if (slot.type != lastType[b])
+                    {
+                        if (lastType[b] >= 0)
+                        {
+                            fadeFilters[b] = filters[b]; // same sizes: copies, never allocates
+                            fadeType[b] = lastType[b];
+                            typeFadeLeft[b] = typeFadeLen;
+                            filters[b].reset();
+                        }
+                        lastType[b] = slot.type;
+                    }
+                    float y = filters[b].process (x, slot, lastCutoffHz[b]);
+                    if (typeFadeLeft[b] > 0)
+                    {
+                        auto old = slot;
+                        old.type = fadeType[b];
+                        const float yOld = fadeFilters[b].process (x, old, lastCutoffHz[b]);
+                        const float t = (float) typeFadeLeft[b] / (float) typeFadeLen;
+                        const float fadeIn = 0.5f - 0.5f * std::cos (juce::MathConstants<float>::pi * (1.0f - t));
+                        y = yOld + (y - yOld) * fadeIn;
+                        --typeFadeLeft[b];
+                    }
+                    x = y;
                 }
                 else if (b == Chain::amp)
                 {
@@ -479,7 +577,7 @@ public:
                 // Amp column is where the envelope and velocity take effect.
                 if (cur.taps[n + 1] != nullptr) cur.taps[n + 1][pos] += x;
             }
-            lastFreq = (float) (freq * tune1);
+            lastFreq = (float) freq1;
 
             if (! std::isfinite (x))
             {
@@ -496,8 +594,35 @@ public:
             dcY1 = blocked;
             const float sample = blocked;
 
-            for (int ch = 0; ch < numChannels; ++ch)
-                output.addSample (ch, pos, sample);
+            // Stereo Spread: place the voice left or right. The bass (below
+            // about 150 Hz) stays in the centre, so the low end is solid and
+            // nothing is lost when the mix is played in mono.
+            float left = sample, right = sample;
+            if (panActive)
+            {
+                if (panMoving)
+                {
+                    panLS += (panL - panLS) * panCoef;
+                    panRS += (panR - panRS) * panCoef;
+                    if (std::abs (panLS - panL) + std::abs (panRS - panR) < 1.0e-6f) { panLS = panL; panRS = panR; panMoving = false; }
+                }
+                bassS += (sample - bassS) * bassCoef;
+                const float upper = sample - bassS;
+                left  = bassS + upper * panLS;
+                right = bassS + upper * panRS;
+            }
+            else
+                bassS = sample; // ready to take over without a jump
+
+            if (numChannels >= 2)
+            {
+                output.addSample (0, pos, left);
+                output.addSample (1, pos, right);
+                for (int ch = 2; ch < numChannels; ++ch)
+                    output.addSample (ch, pos, sample);
+            }
+            else if (numChannels == 1)
+                output.addSample (0, pos, sample);
 
             if (! ampEnv.isActive())
             {
@@ -532,11 +657,16 @@ private:
         subPhase = 0.0;
         for (auto& f : filters)
             f.reset();
+        for (auto& n : typeFadeLeft)
+            n = 0;
         eq.reset();
         sSub = shared.subLevel;
         sFm12 = shared.fm1to2; sFm21 = shared.fm2to1; sRing = shared.ringMod;
         sLvl1 = shared.osc[0].level; sLvl2 = shared.osc[1].level;
-        driftValue = 0.0f;
+        for (auto& d : drift)
+            d.value = 0.0f;
+        bassS = 0.0f;
+        snapPan = true;
         dcX1 = dcY1 = 0.0f;
         oscDown1.reset(); oscDown2.reset();
         snapSmoothing = true; // the next 16-sample update puts the rest back to the knob values
@@ -565,6 +695,7 @@ private:
             out.startLevel.store (e.stageStartLevel());
             out.level.store (e.level());
             out.stage.store (e.stageIndex());
+            out.curveRatio.store ((float) e.curveRatioNow());
         };
         publish (live->filterEnv, filterEnv, cur.fenvA, cur.fenvD, cur.fenvR);
         publish (live->ampEnv, ampEnv, cur.aenvA, cur.aenvD, cur.aenvR);
@@ -572,8 +703,24 @@ private:
 
     void applyEnvelopeSettings()
     {
-        ampEnv.setParameters    (cur.aenvA, cur.aenvD, cur.aenvS, cur.aenvR);
-        filterEnv.setParameters (cur.fenvA, cur.fenvD, cur.fenvS, cur.fenvR);
+        // Voice Variation: each voice's envelopes run a little faster or slower.
+        if (cur.variation > 0.0f)
+        {
+            const float a = std::exp2 (cur.variation * tol[tolEnvA] * varEnvOct);
+            const float d = std::exp2 (cur.variation * tol[tolEnvD] * varEnvOct);
+            const float r = std::exp2 (cur.variation * tol[tolEnvR] * varEnvOct);
+            ampEnv.setParameters    (cur.aenvA * a, cur.aenvD * d, cur.aenvS, cur.aenvR * r, cur.aenvCurve);
+            filterEnv.setParameters (cur.fenvA * a, cur.fenvD * d, cur.fenvS, cur.fenvR * r, cur.fenvCurve);
+            return;
+        }
+        ampEnv.setParameters    (cur.aenvA, cur.aenvD, cur.aenvS, cur.aenvR, cur.aenvCurve);
+        filterEnv.setParameters (cur.fenvA, cur.fenvD, cur.fenvS, cur.fenvR, cur.fenvCurve);
+    }
+
+    // An oscillator's tuning in semitones: its knobs plus this voice's own small offset.
+    float tuneTarget (int o) const
+    {
+        return cur.osc[o].tuneSemitones() + cur.variation * tol[o == 0 ? tolTune1 : tolTune2] * varTuneCents * 0.01f;
     }
 
     // This voice's source values right now.
@@ -660,6 +807,8 @@ private:
 
     Envelope ampEnv, filterEnv;
     FilterSlot filters[3];
+    FilterSlot fadeFilters[3];          // the old type while a type change fades
+    int lastType[3] { -1, -1, -1 }, fadeType[3] {}, typeFadeLeft[3] {}, typeFadeLen = 480;
     VoiceEq eq;
 
     int    targetNote    = 60;
@@ -694,6 +843,18 @@ private:
     float sEq[3] {};
     float sSub = 0.0f, sFm12 = 0.0f, sFm21 = 0.0f, sRing = 0.0f, sLvl1 = 1.0f, sLvl2 = 0.0f;
 
-    float driftCoef = 0.0001f, driftValue = 0.0f, driftTarget = 0.0f;
-    int   driftCounter = 0;
+    struct Drift { float value = 0.0f, target = 0.0f; int counter = 0; };
+    Drift drift[2];                  // one per oscillator
+    float driftCoef = 0.0001f;
+
+    // Voice Variation: this voice's fixed offsets, each -1..1.
+    enum { tolTune1, tolTune2, tolCutoff, tolEnvA, tolEnvD, tolEnvR, tolLevel, numTol };
+    float tol[numTol] {};
+
+    // Stereo Spread
+    float panPos = 0.0f;             // -1 left .. 1 right, before Spread
+    int   panNote = -1;              // the note it was placed for
+    float panL = 1.0f, panR = 1.0f, panLS = 1.0f, panRS = 1.0f, panCoef = 0.01f;
+    float bassS = 0.0f, bassCoef = 0.02f; // the part kept in the centre
+    bool  snapPan = true, panMoving = false, panActive = false;
 };
