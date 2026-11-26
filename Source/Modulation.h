@@ -183,7 +183,27 @@ namespace Mod
             return prevNorm[(size_t) t] + (baseNorm[(size_t) t] - prevNorm[(size_t) t]) * rampFrac (pos);
         }
 
-        float modWheel = 0.0f;              // 0..1
+        float modWheel = 0.0f;              // 0..1, at the end of the block
+
+        // Mod wheel moves inside this block, at their exact sample, so the
+        // sound doesn't depend on the DAW's buffer size.
+        static constexpr int maxWheelEvents = 64;
+        std::array<std::pair<int, float>, maxWheelEvents> wheelEvents {};
+        int numWheelEvents = 0;
+        float wheelAtStart = 0.0f;
+        float modWheelAt (int pos) const
+        {
+            float v = wheelAtStart;
+            for (int e = 0; e < numWheelEvents && wheelEvents[(size_t) e].first <= pos; ++e)
+                v = wheelEvents[(size_t) e].second;
+            return v;
+        }
+
+        // Where this block starts on a fixed 16-sample grid that runs from
+        // the start of playback, so modulation updates land on the same
+        // samples whatever the buffer size.
+        int gridOffset = 0;
+        bool onGrid (int pos) const { return ((gridOffset + pos) & 15) == 0; }
         const float* lfo[2] = { nullptr, nullptr };
 
         // The newest note's source values, for EQ and Volume.

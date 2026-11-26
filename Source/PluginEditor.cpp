@@ -1017,6 +1017,8 @@ void ModRing::mouseDrag (const juce::MouseEvent& e)
 
 void ModRing::mouseUp (const juce::MouseEvent&)
 {
+    if (dragging)
+        editor.getProcessor().markStateChanged(); // so the DAW knows to save it
     dragging = false;
     repaint();
 }
@@ -1027,6 +1029,7 @@ void ModRing::mouseDoubleClick (const juce::MouseEvent&)
     if (s < 0) return;
     editor.getProcessor().modMatrix.set (s, target, 0.0f);
     editor.modulationChanged();
+    editor.getProcessor().markStateChanged();
 }
 
 //==============================================================================
@@ -1102,6 +1105,7 @@ void ModList::mouseUp (const juce::MouseEvent& e)
     {
         editor.getProcessor().modMatrix.set (row.source, row.target, 0.0f); // remove
         editor.modulationChanged();
+        editor.getProcessor().markStateChanged();
     }
 }
 
@@ -1286,6 +1290,11 @@ void DrumGrid::mouseDown (const juce::MouseEvent& e)
     lastDrum = d;
     lastStep = s;
     repaint();
+}
+
+void DrumGrid::mouseUp (const juce::MouseEvent&)
+{
+    processor.markStateChanged(); // so the DAW knows the pattern changed and saves it
 }
 
 void DrumGrid::mouseDrag (const juce::MouseEvent& e)

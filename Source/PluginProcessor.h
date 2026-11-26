@@ -15,6 +15,9 @@ public:
 
     void prepareToPlay (double sampleRate, int samplesPerBlock) override;
     void releaseResources() override {}
+    void reset() override;               // the DAW jumped or stopped: silence everything at once
+    void processBlockBypassed (juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
+    void markStateChanged();             // tell the DAW the project changed (drum grid, routings, chain)
     bool isBusesLayoutSupported (const BusesLayout& layouts) const override;
     void processBlock (juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
     using AudioProcessor::processBlock;
@@ -26,7 +29,7 @@ public:
     bool acceptsMidi() const override  { return true; }
     bool producesMidi() const override { return false; }
     bool isMidiEffect() const override { return false; }
-    double getTailLengthSeconds() const override { return 0.0; }
+    double getTailLengthSeconds() const override; // the longest Amp Release, so renders keep the tails
 
     int getNumPrograms() override    { return 1; }
     int getCurrentProgram() override { return 0; }
@@ -93,7 +96,14 @@ private:
     VoiceSettings voiceSettings;
     SynthEngine synth { voiceSettings };
     float meterMeanSquare = 0.0f;
-    bool rampFromLastBlock = false; // false until the first block after prepareToPlay
+    bool rampFromLastBlock = false;
+    juce::uint64 gridClock = 0;          // samples since playback started (for the modulation grid)
+    std::array<float, 2> lfoRateNow { 1.0f, 1.0f }, lfoCoefNow { 1.0f, 1.0f };
+    bool lfoNeedsUpdate = true;
+    float volModDbNow = 0.0f;
+public:
+    int loadedFormatVersion = StateIDs::currentFormatVersion; // format of the last loaded save
+private:            // Volume modulation in dB, gliding between chunks // false until the first block after prepareToPlay
     Mod::Context modContext;
     std::array<std::atomic<float>*, Mod::numTargets> targetParams {};
     static constexpr int globalModInterval = 32;
@@ -129,6 +139,8 @@ private:
     std::unique_ptr<OutputFollower> outputFollower; // standalone app: follow the Mac's system output
 
     std::atomic<float>* volumeParam = nullptr;
+    std::atomic<float>* ampReleaseParam = nullptr;
+    void silenceAllVoices();
 
     // Every control's live value and its default, so a broken value ("not a
     // number" from a damaged preset or a glitchy host) can be put back.

@@ -420,6 +420,54 @@ namespace SoundChecks
             check (ratio <= 1.2, "Sound 6: stealing a voice doesn't click (step " + juce::String (ratio, 2) + "x normal, target 1.2x)");
         }
 
+        // Same sound at any buffer size: a busy default patch (chord, notes close together,
+        // LFO routing) rendered at buffers 7, 64 and 512 must match exactly.
+        {
+            std::vector<Event> ev;
+            const int offs[] = { 100, 117, 133, 160, 999, 1013, 5000, 5001 };
+            int k = 0;
+            for (int o : offs) ev.push_back ({ o, MidiMessage::noteOn (1, 48 + 3 * k++, (juce::uint8) (60 + 7 * k)) });
+            ev.push_back ({ 20000, MidiMessage::noteOff (1, 48) });
+            ev.push_back ({ 20010, MidiMessage::pitchWheel (1, 12000) });
+            ev.push_back ({ 20500, MidiMessage::controllerEvent (1, 1, 90) });
+            auto setup = [&] { auto q = makeSynth (sr); q->modMatrix.set (Mod::lfo1, Mod::filterTarget (0, 0), 0.2f);
+                               q->modMatrix.set (Mod::modWheel, Mod::filterTarget (0, 0), 0.3f); return q; };
+            auto ref = renderEvents (*setup(), ev, sec, 512);
+            for (int block : { 7, 64 })
+            {
+                auto y = renderEvents (*setup(), ev, sec, block);
+                double worst = 0.0;
+                for (size_t i = 0; i < y.size(); ++i) worst = juce::jmax (worst, (double) std::abs (y[i] - ref[i]));
+                check (worst == 0.0, "Same sound at buffer " + juce::String (block) + " and 512 (largest difference "
+                                         + juce::String (juce::Decibels::gainToDecibels ((float) worst, -400.0f), 1) + " dBFS)");
+            }
+        }
+
+        // Modulation keeps its full depth: a 10 Hz LFO tremolo on Volume is as deep as a 1 Hz one
+        // (it used to lose about 4 dB going through the knob smoother).
+        {
+            auto depthDb = [&] (float rate)
+            {
+                auto q = neutral (sr);
+                setParam (*q, ParamIDs::sawLevel, 0); setParam (*q, ParamIDs::sineLevel, 100);
+                setParam (*q, ParamIDs::slot (0, ParamIDs::slotType), FilterType::off);
+                setParam (*q, ParamIDs::lfoRate, rate); setParam (*q, ParamIDs::lfo1Shape, 0);
+                q->modMatrix.set (Mod::lfo1, Mod::volume, 0.3f);
+                auto x = renderEvents (*q, { { 0, MidiMessage::noteOn (1, 81, (juce::uint8) 127) } }, sec * 3);
+                const int win = (int) (sr / 880.0 * 4); // 4 cycles of the tone
+                double lo = 1e9, hi = 0.0;
+                for (int st = sec; st + win < sec * 3; st += win / 4)
+                {
+                    const double r = rms (x, (size_t) st, (size_t) (st + win));
+                    lo = juce::jmin (lo, r); hi = juce::jmax (hi, r);
+                }
+                return 20.0 * std::log10 (hi / lo);
+            };
+            const double slow = depthDb (1.0f), fast = depthDb (10.0f);
+            check (std::abs (slow - fast) < 1.0, "Modulation keeps its depth: Volume tremolo " + juce::String (slow, 1) + " dB at 1 Hz, "
+                                                    + juce::String (fast, 1) + " dB at 10 Hz");
+        }
+
         // 7. Rearranging the chain while the sound reads it never gives a half-changed order (target: 0 in 10 million reads).
         {
             auto q = makeSynth (sr);
@@ -1620,6 +1668,33 @@ int main (int argc, char** argv)
         allocCount = 0;
         play (200, true);
         check (allocCount.load() == 0, "No memory allocated while playing (" + juce::String ((int) allocCount.load()) + " in 200 blocks)");
+
+        {
+            juce::MemoryBlock st;
+            p->getStateInformation (st);
+            auto x = juce::AudioProcessor::getXmlFromBinary (st.getData(), (int) st.getSize());
+            check (x != nullptr && x->getIntAttribute (StateIDs::formatVersion) == StateIDs::currentFormatVersion,
+                   "Saved state carries its format version (" + juce::String (x != nullptr ? x->getIntAttribute (StateIDs::formatVersion) : 0) + ")");
+        }
+
+        {
+            // A key let go while bypassed doesn't stick on afterwards; reset silences at once.
+            auto b = makeSynth (sr);
+            juce::AudioBuffer<float> buf (2, 512);
+            juce::MidiBuffer on; on.addEvent (juce::MidiMessage::noteOn (1, 60, (juce::uint8) 100), 0);
+            b->processBlock (buf, on);
+            juce::MidiBuffer off; off.addEvent (juce::MidiMessage::noteOff (1, 60), 0);
+            b->processBlockBypassed (buf, off);
+            for (int k = 0; k < 200; ++k) { juce::MidiBuffer none; b->processBlock (buf, none); }
+            check (buf.getMagnitude (0, 0, 512) < 1.0e-4f && b->getTailLengthSeconds() > 0.2,
+                   "Bypass lets go of released keys, and the release tail is reported to the DAW ("
+                       + juce::String (b->getTailLengthSeconds(), 2) + " s)");
+            juce::MidiBuffer on2; on2.addEvent (juce::MidiMessage::noteOn (1, 64, (juce::uint8) 100), 0);
+            for (int k = 0; k < 10; ++k) { b->processBlock (buf, on2); on2.clear(); }
+            b->reset();
+            juce::MidiBuffer none; b->processBlock (buf, none);
+            check (buf.getMagnitude (0, 256, 256) < 1.0e-4f, "Reset silences a playing note at once");
+        }
 
         // A damaged preset holding "nan" for Filter 1 Cutoff.
         juce::MemoryBlock state;

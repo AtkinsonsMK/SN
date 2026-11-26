@@ -111,6 +111,11 @@ namespace StateIDs
     inline constexpr const char* slotOrder  = "slotOrder";  // filters only, e.g. "0,1,2" (older versions)
     inline constexpr const char* chainOrder = "chainOrder"; // whole chain, e.g. "0,1,2,3,4"
     inline constexpr const char* drumPattern = "drumPattern"; // the 16-step grid, see Drums::Pattern
+    // Saved-state format. Bump it when the meaning of saved data changes, and
+    // add the conversion in setStateInformation. Saves without it are version 1.
+    // See docs/ADDING-CONTROLS.md.
+    inline constexpr const char* formatVersion = "formatVersion";
+    inline constexpr int currentFormatVersion = 2;
 }
 
 // The processing chain after the oscillators: three filter slots, the Amp
