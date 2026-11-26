@@ -453,7 +453,6 @@ public:
 
             // The chain: Filters 1-3, Amp and EQ in the chosen order.
             float x = osc;
-            bool ampDone = false;
             for (int n = 0; n < Chain::numBlocks; ++n)
             {
                 const int b = cur.order[n];
@@ -471,7 +470,6 @@ public:
                 else if (b == Chain::amp)
                 {
                     x *= gain;
-                    ampDone = true;
                 }
                 else if (! eq.flat)
                 {

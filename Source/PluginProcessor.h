@@ -16,6 +16,7 @@ public:
     void prepareToPlay (double sampleRate, int samplesPerBlock) override;
     void releaseResources() override {}
     void reset() override;               // the DAW jumped or stopped: silence everything at once
+    using juce::AudioProcessor::processBlockBypassed;
     void processBlockBypassed (juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
     void markStateChanged();             // tell the DAW the project changed (drum grid, routings, chain)
     bool isBusesLayoutSupported (const BusesLayout& layouts) const override;

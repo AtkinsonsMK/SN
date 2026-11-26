@@ -10,6 +10,13 @@ project(SNSynth VERSION 0.1.0 LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# Memory and undefined-behaviour sanitisers for the checks (CI). -DSN_SANITIZE=ON
+option(SN_SANITIZE "Build with AddressSanitizer and UBSan" OFF)
+if(SN_SANITIZE)
+    add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=undefined)
+    add_link_options(-fsanitize=address,undefined)
+endif()
+
 # JUCE is fetched at configure time. To use a local checkout instead, pass
 # -DFETCHCONTENT_SOURCE_DIR_JUCE=/path/to/JUCE
 include(FetchContent)
@@ -69,5 +76,15 @@ if(SN_BUILD_TESTS)
         $<TARGET_PROPERTY:SNSynth,INCLUDE_DIRECTORIES>)
     target_compile_definitions(SNSynthTests PRIVATE
         $<TARGET_PROPERTY:SNSynth,COMPILE_DEFINITIONS>)
-    target_link_libraries(SNSynthTests PRIVATE SNSynth)
+    target_link_libraries(SNSynthTests PRIVATE SNSynth ${CMAKE_DL_LIBS})
+    target_compile_definitions(SNSynthTests PRIVATE SN_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+endif()
+
+
+# Treat compiler warnings in SN's own code as errors (CI). -DSN_WERROR=ON
+option(SN_WERROR "Warnings in SN's own source files are errors" OFF)
+if(SN_WERROR)
+    set_source_files_properties(Source/PluginProcessor.cpp Source/PluginEditor.cpp Source/Visualisers.cpp
+                                Source/OutputFollower.cpp tests/RenderTest.cpp
+                                PROPERTIES COMPILE_OPTIONS "-Werror")
 endif()

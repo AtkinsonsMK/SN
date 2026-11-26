@@ -16,20 +16,54 @@ permissions:
 
 jobs:
   checks:
-    # Quick sound checks on Linux; runs alongside the Mac build.
+    # Sound, stress and real-time checks on Linux, built with warnings as
+    # errors, then the industry plugin checker (pluginval) on the VST3.
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - name: Install build tools
         run: |
           sudo apt-get update -q
           sudo apt-get install -y -q ninja-build libasound2-dev libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxcomposite-dev libxext-dev libfreetype-dev libfontconfig1-dev
-      - name: Build and run offline checks
+      - name: Build (warnings are errors)
         run: |
-          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DSN_BUILD_TESTS=ON
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DSN_BUILD_TESTS=ON -DSN_WERROR=ON
+          cmake --build build --target SNSynthTests SNSynth_VST3
+      - name: Sound and engineering checks
+        run: ./build/SNSynthTests
+      - name: Stress, real-time and reference-sound checks
+        run: ./build/SNSynthTests --stress
+      - name: CPU benchmark
+        run: ./build/SNSynthTests --bench
+      - name: pluginval (strictness 10)
+        run: |
+          curl -sSL -o pluginval.zip https://github.com/Tracktion/pluginval/releases/download/v1.0.4/pluginval_Linux.zip
+          unzip -q pluginval.zip
+          ./pluginval --strictness-level 10 --skip-gui-tests --validate-in-process --validate "build/SNSynth_artefacts/Release/VST3/SN Synth.vst3"
+
+  sanitizers:
+    # The same checks under AddressSanitizer and UndefinedBehaviorSanitizer,
+    # which stop on any memory error or undefined behaviour.
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build tools
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q ninja-build libasound2-dev libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxcomposite-dev libxext-dev libfreetype-dev libfontconfig1-dev
+      - name: Build with sanitizers
+        run: |
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DSN_BUILD_TESTS=ON -DSN_SANITIZE=ON
           cmake --build build --target SNSynthTests
+      - name: Checks under sanitizers
+        env:
+          ASAN_OPTIONS: detect_leaks=0:halt_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: |
           ./build/SNSynthTests
+          ./build/SNSynthTests --stress
 
   build:
     # GitHub's Mac runners have had no capacity since Nov 2026, so the Mac

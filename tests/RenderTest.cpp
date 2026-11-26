@@ -13,10 +13,10 @@
 
 // Counts memory allocations while switched on, to prove the audio thread never allocates.
 static std::atomic<long> allocCount { 0 };
-static std::atomic<bool> countAllocs { false };
+static thread_local bool countAllocs = false; // only the thread under test is counted
 void* operator new (std::size_t n)
 {
-    if (countAllocs.load (std::memory_order_relaxed)) allocCount.fetch_add (1, std::memory_order_relaxed);
+    if (countAllocs) allocCount.fetch_add (1, std::memory_order_relaxed);
     if (void* ptr = std::malloc (n > 0 ? n : 1)) return ptr;
     throw std::bad_alloc();
 }
@@ -133,6 +133,8 @@ static int saveSnapshot (const juce::File& file)
     juce::PNGImageFormat().writeImageToStream (img2, out2);
     return 0;
 }
+
+#include "StressChecks.inc"
 
 // ---- Sound-quality checks (targets from the 26 Nov sound review) ----------
 namespace SoundChecks
@@ -438,7 +440,7 @@ namespace SoundChecks
                 auto y = renderEvents (*setup(), ev, sec, block);
                 double worst = 0.0;
                 for (size_t i = 0; i < y.size(); ++i) worst = juce::jmax (worst, (double) std::abs (y[i] - ref[i]));
-                check (worst == 0.0, "Same sound at buffer " + juce::String (block) + " and 512 (largest difference "
+                check (! (worst > 0.0), "Same sound at buffer " + juce::String (block) + " and 512 (largest difference "
                                          + juce::String (juce::Decibels::gainToDecibels ((float) worst, -400.0f), 1) + " dBFS)");
             }
         }
@@ -491,6 +493,17 @@ int main (int argc, char** argv)
     juce::ScopedJuceInitialiser_GUI juceInit;
     const double sr = 48000.0;
 
+    if (argc > 1 && juce::String (argv[1]) == "--write-references")
+    {
+        StressChecks::writeReferences();
+        return 0;
+    }
+    if (argc > 1 && (juce::String (argv[1]) == "--stress" || juce::String (argv[1]) == "--bench"))
+    {
+        if (juce::String (argv[1]) == "--stress") StressChecks::run(); else StressChecks::bench();
+        std::cout << (failures == 0 ? "All checks passed" : juce::String (failures) + " check(s) failed") << std::endl;
+        return failures == 0 ? 0 : 1;
+    }
     if (argc > 1 && juce::String (argv[1]) == "--sound")
     {
         SoundChecks::run (sr);
@@ -1645,8 +1658,8 @@ int main (int argc, char** argv)
     // Robustness: no memory allocated per block, broken numbers recover,
     // and the Numbers view's Amp column shows the Amp's effect.
     {
-        const double sr = 48000.0;
-        auto p = makeSynth (sr);
+        const double robustSr = 48000.0;
+        auto p = makeSynth (robustSr);
         setParam (*p, ParamIDs::drumPlay, 1.0f);
         juce::AudioBuffer<float> block (2, 512);
         auto play = [&] (int blocks, bool count)
@@ -1679,7 +1692,7 @@ int main (int argc, char** argv)
 
         {
             // A key let go while bypassed doesn't stick on afterwards; reset silences at once.
-            auto b = makeSynth (sr);
+            auto b = makeSynth (robustSr);
             juce::AudioBuffer<float> buf (2, 512);
             juce::MidiBuffer on; on.addEvent (juce::MidiMessage::noteOn (1, 60, (juce::uint8) 100), 0);
             b->processBlock (buf, on);

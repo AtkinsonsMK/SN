@@ -296,7 +296,7 @@ void SNSynthProcessor::updateVoiceSettings()
         const float norm = m.ranges[(size_t) t].convertTo0to1 (real);
         m.prevReal[(size_t) t] = rampFromLastBlock ? m.baseReal[(size_t) t] : real;
         m.prevNorm[(size_t) t] = rampFromLastBlock ? m.baseNorm[(size_t) t] : norm;
-        m.ramping[(size_t) t] = m.prevReal[(size_t) t] != real;
+        m.ramping[(size_t) t] = std::abs (m.prevReal[(size_t) t] - real) > 0.0f;
         m.anyRamping = m.anyRamping || m.ramping[(size_t) t];
         m.baseReal[(size_t) t] = real;
         m.baseNorm[(size_t) t] = norm;
@@ -738,7 +738,7 @@ void SNSynthProcessor::renderLfo (int numSamples)
                         offset[route.target - Mod::lfo1Rate] += src[route.source] * route.amount;
                 }
             }
-            for (int l = 0; l < 2; ++l)
+            for (size_t l = 0; l < 2; ++l)
             {
                 const float ro = offset[rateT[l] - Mod::lfo1Rate], so = offset[smoothT[l] - Mod::lfo1Rate];
                 rate[l] = std::abs (ro) > 1.0e-7f ? Mod::applyOffset (m, rateT[l], ro) : m.baseReal[(size_t) rateT[l]];
@@ -753,25 +753,25 @@ void SNSynthProcessor::renderLfo (int numSamples)
             lfoNeedsUpdate = false;
         }
 
-        for (int l = 0; l < 2; ++l)
+        for (size_t l = 0; l < 2; ++l)
         {
-            auto& phase = lfoPhases[(size_t) l];
-            const float raw = lfoShapeValue (shapes[l], phase, lfoRandom[(size_t) l]);
-            lfoSmoothed[(size_t) l] += (raw - lfoSmoothed[(size_t) l]) * coef[l];
-            lfoBuffers[(size_t) l][(size_t) i] = lfoSmoothed[(size_t) l];
+            auto& phase = lfoPhases[l];
+            const float raw = lfoShapeValue (shapes[l], phase, lfoRandom[l]);
+            lfoSmoothed[l] += (raw - lfoSmoothed[l]) * coef[l];
+            lfoBuffers[l][(size_t) i] = lfoSmoothed[l];
             phase += rate[l] / currentSampleRate;
             if (phase >= 1.0)
             {
                 phase -= std::floor (phase);
-                lfoRandom[(size_t) l] = lfoRng.nextFloat() * 2.0f - 1.0f;
+                lfoRandom[l] = lfoRng.nextFloat() * 2.0f - 1.0f;
             }
         }
     }
 
-    for (int l = 0; l < 2; ++l)
+    for (size_t l = 0; l < 2; ++l)
     {
-        voiceSettings.lfo[l] = lfoBuffers[(size_t) l].data();
-        modContext.lfo[l] = lfoBuffers[(size_t) l].data();
+        voiceSettings.lfo[l] = lfoBuffers[l].data();
+        modContext.lfo[l] = lfoBuffers[l].data();
     }
 }
 
